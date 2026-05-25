@@ -1,2 +1,1 @@
-# All dependencies are Python standard library.
-# This file tells Railway/nixpacks the project is Python.
+APScheduler>=3.10
