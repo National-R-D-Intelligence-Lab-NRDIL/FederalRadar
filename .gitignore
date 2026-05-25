@@ -1,0 +1,19 @@
+# Data files (large; managed outside version control)
+data/raw/
+data/*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local editor / tool settings
+.claude/
+.vscode/
+.cursor/
+*.local.json
+
+# Environment
+.env
+.env.*
