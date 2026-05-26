@@ -1,6 +1,6 @@
 """
 db.py
-SQLite database setup and upsert for NSF awards.
+SQLite database setup and upsert for federal awards (NSF, NIH, and future agencies).
 """
 
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 DB_PATH = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent / "data" / "federal_awards.db")))
 
 CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS nsf_awards (
+CREATE TABLE IF NOT EXISTS awards (
     awd_id                  TEXT PRIMARY KEY,
     awd_titl_txt            TEXT NOT NULL,
     inst_name               TEXT,
@@ -29,26 +29,40 @@ CREATE TABLE IF NOT EXISTS nsf_awards (
     fiscal_year             INTEGER,
     raw_json                TEXT,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    -- shared across agencies
+    source                  TEXT,
+    opportunity_number      TEXT,
+    -- NIH-specific (NULL for NSF records)
+    activity_code           TEXT,
+    nih_institute           TEXT,
+    direct_cost_amt         REAL
 );
 """
 
 UPSERT_SQL = """
-INSERT INTO nsf_awards (
+INSERT INTO awards (
     awd_id, awd_titl_txt, inst_name, inst_state_code,
     awd_amount, obligation_date, project_start_date, project_end_date, awd_abstract_narration,
     dir_abbr, div_abbr, pgm_ele_name, pi_name,
-    agcy_id, fiscal_year, raw_json, created_at, updated_at
+    agcy_id, fiscal_year, raw_json, created_at, updated_at,
+    source, opportunity_number, activity_code, nih_institute, direct_cost_amt
 ) VALUES (
     :awd_id, :awd_titl_txt, :inst_name, :inst_state_code,
     :awd_amount, :obligation_date, :project_start_date, :project_end_date, :awd_abstract_narration,
     :dir_abbr, :div_abbr, :pgm_ele_name, :pi_name,
-    :agcy_id, :fiscal_year, :raw_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    :agcy_id, :fiscal_year, :raw_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+    :source, :opportunity_number, :activity_code, :nih_institute, :direct_cost_amt
 ) ON CONFLICT(awd_id) DO UPDATE SET
     awd_titl_txt            = excluded.awd_titl_txt,
     inst_name               = excluded.inst_name,
     inst_state_code         = excluded.inst_state_code,
-    awd_amount              = excluded.awd_amount,
+    -- Take the higher amount: total_obligated_amount only grows over time.
+    -- For NIH/NSF this is a no-op (single record per award).
+    awd_amount              = CASE
+                                WHEN excluded.awd_amount > awards.awd_amount THEN excluded.awd_amount
+                                ELSE awards.awd_amount
+                              END,
     obligation_date         = excluded.obligation_date,
     project_start_date      = excluded.project_start_date,
     project_end_date        = excluded.project_end_date,
@@ -58,8 +72,15 @@ INSERT INTO nsf_awards (
     pgm_ele_name            = excluded.pgm_ele_name,
     pi_name                 = excluded.pi_name,
     agcy_id                 = excluded.agcy_id,
-    fiscal_year             = excluded.fiscal_year,
+    -- Never overwrite fiscal_year: the first insert captures the original award year.
+    -- Later transactions (continuations, revisions) must not change when the grant was born.
+    fiscal_year             = awards.fiscal_year,
     raw_json                = excluded.raw_json,
+    source                  = excluded.source,
+    opportunity_number      = excluded.opportunity_number,
+    activity_code           = excluded.activity_code,
+    nih_institute           = excluded.nih_institute,
+    direct_cost_amt         = excluded.direct_cost_amt,
     updated_at              = CURRENT_TIMESTAMP;
 """
 
@@ -69,12 +90,69 @@ def _connect() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+CREATE_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_awards_source          ON awards(source);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_fiscal_year     ON awards(fiscal_year);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy       ON awards(source, fiscal_year);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_obligation_date ON awards(obligation_date);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_inst_name       ON awards(inst_name);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_activity_code   ON awards(activity_code);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_nih_institute   ON awards(nih_institute);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_inst_state      ON awards(inst_state_code);",
+]
+
+
 def init_db():
     with _connect() as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute(CREATE_TABLE_SQL)
+        for idx_sql in CREATE_INDEXES_SQL:
+            conn.execute(idx_sql)
         conn.commit()
+
+
+def migrate_db():
+    """
+    Idempotently upgrade an existing DB to the unified awards schema.
+
+    Safe to run multiple times — checks column/table existence before acting.
+    Call once after pulling this code onto a machine with the old nsf_awards table.
+    """
+    with _connect() as conn:
+        tables = {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+
+        # Step 1: rename nsf_awards → awards (only if old name still exists)
+        if "nsf_awards" in tables and "awards" not in tables:
+            conn.execute("ALTER TABLE nsf_awards RENAME TO awards")
+            print("  Renamed nsf_awards -> awards")
+
+        # Step 2: add new columns (idempotent — skip if already present)
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(awards)")}
+
+        new_columns = [
+            ("source",           "TEXT"),
+            ("opportunity_number", "TEXT"),
+            ("activity_code",    "TEXT"),
+            ("nih_institute",    "TEXT"),
+            ("direct_cost_amt",  "REAL"),
+        ]
+        for col_name, col_type in new_columns:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE awards ADD COLUMN {col_name} {col_type}")
+                print(f"  Added column: {col_name} {col_type}")
+
+        # Step 3: backfill source = 'nsf' for existing NSF records
+        updated = conn.execute(
+            "UPDATE awards SET source = 'nsf' WHERE source IS NULL"
+        ).rowcount
+        if updated:
+            print(f"  Backfilled source='nsf' for {updated:,} rows")
+
+        conn.commit()
+    print("migrate_db() complete.")
 
 
 def upsert_nsf_award(record: dict):
@@ -95,6 +173,11 @@ def upsert_nsf_award(record: dict):
         "agcy_id":                record.get("agcy_id"),
         "fiscal_year":            record.get("fiscal_year"),
         "raw_json":               json.dumps(record),
+        "source":                 "nsf",
+        "opportunity_number":     None,
+        "activity_code":          None,
+        "nih_institute":          None,
+        "direct_cost_amt":        None,
     }
     with _connect() as conn:
         conn.execute(UPSERT_SQL, row)
@@ -115,7 +198,12 @@ if __name__ == "__main__":
         tables = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table';"
         ).fetchall()
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(awards)")]
 
     print("Tables in federal_awards.db:")
     for (name,) in tables:
         print(f"  {name}")
+
+    print("\nColumns in awards:")
+    for col in cols:
+        print(f"  {col}")

@@ -65,6 +65,11 @@ def map_record(rec: dict) -> dict:
         "agcy_id":                None,
         "fiscal_year":            fiscal_year,
         "raw_json":               json.dumps(rec),
+        "source":                 "nsf",
+        "opportunity_number":     None,
+        "activity_code":          None,
+        "nih_institute":          None,
+        "direct_cost_amt":        None,
     }
 
 
@@ -86,7 +91,7 @@ def fetch_db_row(awd_id: str) -> dict | None:
     ]
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
-        f"SELECT {', '.join(COLUMNS)} FROM nsf_awards WHERE awd_id = ?", (awd_id,)
+        f"SELECT {', '.join(COLUMNS)} FROM awards WHERE awd_id = ?", (awd_id,)
     ).fetchone()
     conn.close()
     if row is None:
@@ -186,7 +191,7 @@ def run_compare():
         }
 
         row = conn.execute(
-            f"SELECT {DB_COLS} FROM nsf_awards WHERE awd_id = ?", (award_id,)
+            f"SELECT {DB_COLS} FROM awards WHERE awd_id = ?", (award_id,)
         ).fetchone()
         db_rec = dict(zip(COMPARE_COLS, row)) if row else {}
 
@@ -257,7 +262,7 @@ def run_exists(days: int):
     placeholders = ",".join("?" * len(ids))
     existing = set(
         row[0] for row in conn.execute(
-            f"SELECT awd_id FROM nsf_awards WHERE awd_id IN ({placeholders})", ids
+            f"SELECT awd_id FROM awards WHERE awd_id IN ({placeholders})", ids
         ).fetchall()
     )
     conn.close()
@@ -336,7 +341,7 @@ def main():
     # snapshot existing IDs to distinguish inserts vs updates
     conn = sqlite3.connect(DB_PATH)
     existing_ids = set(
-        row[0] for row in conn.execute("SELECT awd_id FROM nsf_awards").fetchall()
+        row[0] for row in conn.execute("SELECT awd_id FROM awards").fetchall()
     )
     conn.close()
 

@@ -67,12 +67,17 @@ def map_record(raw: dict) -> dict:
         "agcy_id":                raw.get("agcy_id"),
         "fiscal_year":            fiscal_year,
         "raw_json":               json.dumps(raw),
+        "source":                 "nsf",
+        "opportunity_number":     None,
+        "activity_code":          None,
+        "nih_institute":          None,
+        "direct_cost_amt":        None,
     }
 
 
 def count_existing(awd_id: str, conn: sqlite3.Connection) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM nsf_awards WHERE awd_id = ?", (awd_id,)
+        "SELECT 1 FROM awards WHERE awd_id = ?", (awd_id,)
     ).fetchone()
     return row is not None
 
@@ -83,7 +88,7 @@ def process_zip(zip_path: Path) -> dict:
     # snapshot existing IDs for this run to track inserts vs updates
     conn = sqlite3.connect(DB_PATH)
     existing_ids = set(
-        row[0] for row in conn.execute("SELECT awd_id FROM nsf_awards").fetchall()
+        row[0] for row in conn.execute("SELECT awd_id FROM awards").fetchall()
     )
     conn.close()
 
@@ -134,14 +139,15 @@ def process_zip(zip_path: Path) -> dict:
 def run_summary_query():
     conn = sqlite3.connect(DB_PATH)
     print("\nSELECT fiscal_year, COUNT(*), ROUND(SUM(awd_amount)/1e6,1)")
-    print("FROM nsf_awards GROUP BY fiscal_year ORDER BY fiscal_year DESC;\n")
+    print("FROM awards WHERE source='nsf' GROUP BY fiscal_year ORDER BY fiscal_year DESC;\n")
     print(f"  {'fiscal_year':>12}  {'awards':>8}  {'total_millions':>15}")
     print("  " + "-" * 40)
     for row in conn.execute("""
         SELECT fiscal_year,
                COUNT(*)                          AS awards,
                ROUND(SUM(awd_amount)/1000000.0, 1) AS total_millions
-        FROM nsf_awards
+        FROM awards
+        WHERE source = 'nsf'
         GROUP BY fiscal_year
         ORDER BY fiscal_year DESC
     """):

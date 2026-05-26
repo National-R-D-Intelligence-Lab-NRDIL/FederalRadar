@@ -1,5 +1,12 @@
 {
-  "expected_record_count": 83845,
-  "expected_funding_billions": 49.9502,
-  "note": "Baseline captured 2026-05-23 from NSF ZIP bulk load (2016-2026). Update after each full reload."
+  "nsf": {
+    "expected_record_count": 83845,
+    "expected_funding_billions": 49.9502,
+    "note": "Baseline captured 2026-05-23 from NSF ZIP bulk load (2016-2026). Update after each full reload."
+  },
+  "nih": {
+    "expected_record_count": null,
+    "expected_funding_billions": null,
+    "note": "Fill in after running: python scripts/nih_api_fetcher.py --fiscal-years '2024,2025'"
+  }
 }

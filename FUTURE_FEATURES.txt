@@ -1,0 +1,25 @@
+FUTURE FEATURES
+===============
+
+GRANTS FILTERING
+----------------
+[ ] "Currently active grants" filter
+    - Store period_of_performance_current_end_date in DB for all USASpending awards
+    - Add NSF expDate and NIH project_end_date equivalents
+    - Filter: show grants where end_date >= today
+    - Separate concept from fiscal_year (when awarded) vs active status (still running)
+
+DATA / SOURCES
+--------------
+[ ] DHS grants (all fiscal years 2019-2026)
+    - Skipped for MVP due to USASpending bulk download taking 20+ minutes per year
+    - Run as a one-time overnight job when ready
+
+[ ] NIH amount labeling in UI
+    - NIH awd_amount = budget period slice only (one year's funding), NOT total award value
+    - NSF awd_amount = full award total across entire grant lifespan
+    - USASpending awd_amount = cumulative total obligated to date (comparable to NSF)
+    - In UI: label NIH amounts as "Annual Budget" and NSF/USASpending as "Total Award"
+    - Future: NIH multi-year deduplication — group by core_project_num, show one canonical
+      record per project using the first year's record and latest budget period amount
+

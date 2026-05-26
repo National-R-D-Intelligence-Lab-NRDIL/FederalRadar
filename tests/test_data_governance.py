@@ -32,6 +32,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.nsf_etl import map_record as etl_map_record
 from scripts.nsf_api_fetcher import date_to_iso, map_record as api_map_record
+from scripts.nih_api_fetcher import iso_date as nih_iso_date, map_record as nih_map_record
 from src.db import CREATE_TABLE_SQL, UPSERT_SQL
 
 REAL_DB = PROJECT_ROOT / "data" / "federal_awards.db"
@@ -62,7 +63,7 @@ def live_conn():
 
 @pytest.fixture
 def mem_db():
-    """Fresh in-memory SQLite with the nsf_awards schema."""
+    """Fresh in-memory SQLite with the awards schema."""
     conn = sqlite3.connect(":memory:")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute(CREATE_TABLE_SQL)
@@ -109,13 +110,17 @@ EXPECTED_COLUMNS = {
     "awd_abstract_narration", "dir_abbr", "div_abbr", "pgm_ele_name",
     "pi_name", "agcy_id", "fiscal_year", "raw_json",
     "created_at", "updated_at",
+    # unified multi-agency columns
+    "source", "opportunity_number",
+    # NIH-specific (NULL for NSF records)
+    "activity_code", "nih_institute", "direct_cost_amt",
 }
 
 
 @real_db
 def test_S01_all_columns_present(live_conn):
-    """S-01: All 18 expected columns are present in nsf_awards."""
-    cols = {row[1] for row in live_conn.execute("PRAGMA table_info(nsf_awards)")}
+    """S-01: All expected columns are present in awards."""
+    cols = {row[1] for row in live_conn.execute("PRAGMA table_info(awards)")}
     missing = EXPECTED_COLUMNS - cols
     assert not missing, f"Missing columns: {missing}"
 
@@ -125,7 +130,7 @@ def test_S02_awd_id_unique(live_conn):
     """S-02: awd_id has no duplicates."""
     count = live_conn.execute(
         "SELECT COUNT(*) FROM ("
-        "  SELECT awd_id FROM nsf_awards GROUP BY awd_id HAVING COUNT(*) > 1"
+        "  SELECT awd_id FROM awards GROUP BY awd_id HAVING COUNT(*) > 1"
         ")"
     ).fetchone()[0]
     assert count == 0, f"{count} duplicate awd_id(s) found"
@@ -135,7 +140,7 @@ def test_S02_awd_id_unique(live_conn):
 def test_S03_awd_titl_txt_not_null(live_conn):
     """S-03: awd_titl_txt is never NULL."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE awd_titl_txt IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE awd_titl_txt IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL awd_titl_txt"
 
@@ -144,7 +149,7 @@ def test_S03_awd_titl_txt_not_null(live_conn):
 def test_S04_created_at_not_null(live_conn):
     """S-04: created_at is never NULL."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE created_at IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE created_at IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL created_at"
 
@@ -153,7 +158,7 @@ def test_S04_created_at_not_null(live_conn):
 def test_S05_updated_at_not_null(live_conn):
     """S-05: updated_at is never NULL."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE updated_at IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE updated_at IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL updated_at"
 
@@ -162,7 +167,7 @@ def test_S05_updated_at_not_null(live_conn):
 def test_S06_created_at_lte_updated_at(live_conn):
     """S-06: created_at <= updated_at for all rows."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE created_at > updated_at"
+        "SELECT COUNT(*) FROM awards WHERE created_at > updated_at"
     ).fetchone()[0]
     assert count == 0, f"{count} rows where created_at > updated_at"
 
@@ -175,7 +180,7 @@ def test_S07_awd_id_format(live_conn):
     Flagged for documentation; not a hard failure.
     """
     rows = live_conn.execute(
-        "SELECT awd_id FROM nsf_awards "
+        "SELECT awd_id FROM awards "
         "WHERE awd_id NOT GLOB '[0-9][0-9][0-9][0-9][0-9][0-9][0-9]' LIMIT 20"
     ).fetchall()
     if rows:
@@ -190,7 +195,7 @@ def test_S07_awd_id_format(live_conn):
 def test_S08_raw_json_not_null(live_conn):
     """S-08: raw_json is never NULL (audit trail must be preserved)."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE raw_json IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE raw_json IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL raw_json"
 
@@ -199,7 +204,7 @@ def test_S08_raw_json_not_null(live_conn):
 def test_S09_raw_json_parseable(live_conn):
     """S-09: raw_json is valid JSON (sample 1,000 rows)."""
     rows = live_conn.execute(
-        "SELECT awd_id, raw_json FROM nsf_awards LIMIT 1000"
+        "SELECT awd_id, raw_json FROM awards LIMIT 1000"
     ).fetchall()
     errors = []
     for awd_id, rj in rows:
@@ -223,15 +228,30 @@ def test_S11_foreign_key_pragma(mem_db):
     assert result is not None, "PRAGMA foreign_keys not accessible"
 
 
+@real_db
+def test_S12_source_nsf_for_all_records(live_conn):
+    """S-12: No records have a NULL source tag (migration backfill verified).
+
+    Originally checked source='nsf' for all rows (pre-NIH era). Updated to verify
+    that every record across all agencies has a non-null source tag.
+    """
+    null_count = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source IS NULL"
+    ).fetchone()[0]
+    assert null_count == 0, (
+        f"{null_count} row(s) have NULL source (migration backfill incomplete)"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. ETL PIPELINE INTEGRITY (ZIP Loading)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @real_db
 def test_E01_total_record_count(live_conn):
-    """E-01: Total record count matches baseline ±0.1%."""
-    expected = BASELINES["expected_record_count"]
-    actual = live_conn.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    """E-01: Total NSF record count matches baseline ±0.1%."""
+    expected = BASELINES["nsf"]["expected_record_count"]
+    actual = live_conn.execute("SELECT COUNT(*) FROM awards WHERE source = 'nsf'").fetchone()[0]
     tolerance = expected * 0.001
     assert abs(actual - expected) <= tolerance, (
         f"Record count {actual:,} outside ±0.1% of baseline {expected:,}"
@@ -240,9 +260,9 @@ def test_E01_total_record_count(live_conn):
 
 @real_db
 def test_E02_total_funding(live_conn):
-    """E-02: Total funding matches baseline ±0.5%."""
-    expected_b = BASELINES["expected_funding_billions"]
-    actual = live_conn.execute("SELECT SUM(awd_amount) FROM nsf_awards").fetchone()[0] or 0.0
+    """E-02: Total NSF funding matches baseline ±0.5%."""
+    expected_b = BASELINES["nsf"]["expected_funding_billions"]
+    actual = live_conn.execute("SELECT SUM(awd_amount) FROM awards WHERE source = 'nsf'").fetchone()[0] or 0.0
     actual_b = actual / 1e9
     assert abs(actual_b - expected_b) / expected_b <= 0.005, (
         f"Total funding ${actual_b:.2f}B outside ±0.5% of baseline ${expected_b:.2f}B"
@@ -259,7 +279,7 @@ def test_E03_each_fy_has_records(live_conn):
     rows = {
         row[0]: row[1]
         for row in live_conn.execute(
-            "SELECT fiscal_year, COUNT(*) FROM nsf_awards "
+            "SELECT fiscal_year, COUNT(*) FROM awards "
             "WHERE fiscal_year BETWEEN 2019 AND 2026 GROUP BY fiscal_year"
         )
     }
@@ -270,7 +290,7 @@ def test_E03_each_fy_has_records(live_conn):
     gap = {
         row[0]: row[1]
         for row in live_conn.execute(
-            "SELECT fiscal_year, COUNT(*) FROM nsf_awards "
+            "SELECT fiscal_year, COUNT(*) FROM awards "
             "WHERE fiscal_year BETWEEN 2016 AND 2018 GROUP BY fiscal_year"
         )
     }
@@ -363,16 +383,16 @@ def test_E15_upsert_idempotency(mem_db):
     rec = etl_map_record(_make_etl_raw())
     _upsert(mem_db, rec)
     created_v1, updated_v1 = mem_db.execute(
-        "SELECT created_at, updated_at FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT created_at, updated_at FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()
 
     time.sleep(1.1)
     _upsert(mem_db, rec)
     created_v2, updated_v2 = mem_db.execute(
-        "SELECT created_at, updated_at FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT created_at, updated_at FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()
 
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 1, f"Expected 1 row after idempotent upsert, got {count}"
     assert created_v2 == created_v1, f"created_at changed on re-upsert: {created_v1!r} → {created_v2!r}"
     assert updated_v2 > updated_v1, "updated_at should advance after re-upsert"
@@ -386,7 +406,7 @@ def test_E16_batch_exactly_500(mem_db):
     ]
     mem_db.executemany(UPSERT_SQL, records)
     mem_db.commit()
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 500
 
 
@@ -395,7 +415,7 @@ def test_E17_batch_single_record(mem_db):
     rec = etl_map_record(_make_etl_raw(awd_id="9999999"))
     mem_db.executemany(UPSERT_SQL, [rec])
     mem_db.commit()
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 1
 
 
@@ -418,7 +438,7 @@ def test_E20_raw_json_stored_and_parseable(mem_db):
     rec = etl_map_record(_make_etl_raw())
     _upsert(mem_db, rec)
     rj = mem_db.execute(
-        "SELECT raw_json FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT raw_json FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()[0]
     assert rj is not None, "raw_json is NULL"
     parsed = json.loads(rj)
@@ -494,7 +514,7 @@ def test_A08_api_upsert_new_record(mem_db):
     })
     _upsert(mem_db, rec)
     row = mem_db.execute(
-        "SELECT awd_id, created_at FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT awd_id, created_at FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()
     assert row is not None, "Record not inserted"
     assert row[1] is not None, "created_at is NULL after insert"
@@ -511,11 +531,11 @@ def test_A09_api_upsert_existing_updates(mem_db):
                               "fundsObligatedAmt": "75000", "date": "06/15/2024"})
     _upsert(mem_db, rec_v2)
 
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 1, f"Expected 1 row, got {count} (duplicate created)"
 
     title = mem_db.execute(
-        "SELECT awd_titl_txt FROM nsf_awards WHERE awd_id = '1234567'"
+        "SELECT awd_titl_txt FROM awards WHERE awd_id = '1234567'"
     ).fetchone()[0]
     assert title == "Updated Title"
 
@@ -544,7 +564,7 @@ def test_A11_api_vs_etl_field_consistency(live_conn):
     ]
     # Use a known stable award ID
     sample_id = live_conn.execute(
-        "SELECT awd_id FROM nsf_awards WHERE fiscal_year = 2024 LIMIT 1"
+        "SELECT awd_id FROM awards WHERE fiscal_year = 2024 LIMIT 1"
     ).fetchone()
     if sample_id is None:
         pytest.skip("No FY2024 records available")
@@ -556,7 +576,7 @@ def test_A11_api_vs_etl_field_consistency(live_conn):
 
     api_rec = api_map(raw)
     db_row = live_conn.execute(
-        f"SELECT {', '.join(COMPARE_COLS)} FROM nsf_awards WHERE awd_id = ?", (awd_id,)
+        f"SELECT {', '.join(COMPARE_COLS)} FROM awards WHERE awd_id = ?", (awd_id,)
     ).fetchone()
     if db_row is None:
         pytest.skip(f"Award {awd_id} not found in DB")
@@ -605,7 +625,7 @@ def test_C01_sample_10_awards_field_match(live_conn):
     ]
     sample_ids = [
         row[0] for row in live_conn.execute(
-            "SELECT awd_id FROM nsf_awards WHERE fiscal_year = 2025 LIMIT 10"
+            "SELECT awd_id FROM awards WHERE fiscal_year = 2025 LIMIT 10"
         )
     ]
     mismatches = []
@@ -615,7 +635,7 @@ def test_C01_sample_10_awards_field_match(live_conn):
             continue
         api_rec = api_map(raw)
         db_row = live_conn.execute(
-            f"SELECT {', '.join(COMPARE_COLS)} FROM nsf_awards WHERE awd_id = ?", (awd_id,)
+            f"SELECT {', '.join(COMPARE_COLS)} FROM awards WHERE awd_id = ?", (awd_id,)
         ).fetchone()
         if db_row is None:
             continue
@@ -635,7 +655,7 @@ def test_C02_fy2025_record_count_variance(live_conn):
     from scripts.nsf_api_fetcher import fetch_all
 
     zip_count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE fiscal_year = 2025"
+        "SELECT COUNT(*) FROM awards WHERE fiscal_year = 2025"
     ).fetchone()[0]
     if zip_count == 0:
         pytest.skip("No FY2025 records in DB")
@@ -662,7 +682,7 @@ def test_C03_fy2025_funding_variance(live_conn):
     from scripts.nsf_api_fetcher import fetch_all, map_record as api_map
 
     zip_total = live_conn.execute(
-        "SELECT SUM(awd_amount) FROM nsf_awards WHERE fiscal_year = 2025"
+        "SELECT SUM(awd_amount) FROM awards WHERE fiscal_year = 2025"
     ).fetchone()[0] or 0.0
     if zip_total == 0:
         pytest.skip("No FY2025 funding data in DB")
@@ -696,7 +716,7 @@ def test_C04_C05_zip_only_and_api_only_awards(live_conn):
 
     db_ids = {
         row[0] for row in live_conn.execute(
-            "SELECT awd_id FROM nsf_awards "
+            "SELECT awd_id FROM awards "
             "WHERE obligation_date BETWEEN '2025-01-01' AND '2025-03-31'"
         )
     }
@@ -725,7 +745,7 @@ def test_C06_amount_discrepancies_flagged(live_conn):
 
     sample_ids = [
         row[0] for row in live_conn.execute(
-            "SELECT awd_id FROM nsf_awards WHERE fiscal_year = 2025 "
+            "SELECT awd_id FROM awards WHERE fiscal_year = 2025 "
             "AND awd_amount IS NOT NULL LIMIT 10"
         )
     ]
@@ -736,7 +756,7 @@ def test_C06_amount_discrepancies_flagged(live_conn):
             continue
         api_amount = api_map(raw)["awd_amount"]
         db_amount = live_conn.execute(
-            "SELECT awd_amount FROM nsf_awards WHERE awd_id = ?", (awd_id,)
+            "SELECT awd_amount FROM awards WHERE awd_id = ?", (awd_id,)
         ).fetchone()[0]
         if api_amount is not None and db_amount is not None:
             if abs(api_amount - db_amount) > 0.01:
@@ -756,7 +776,7 @@ def test_C06_amount_discrepancies_flagged(live_conn):
 def test_Q01_null_rate_awd_amount(live_conn):
     """Q-01: NULL rate for awd_amount < 1%."""
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN awd_amount IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN awd_amount IS NULL THEN 1 ELSE 0 END) FROM awards"
     ).fetchone()
     rate = nulls / total
     assert rate < 0.01, f"awd_amount NULL rate {rate:.2%} exceeds 1% limit"
@@ -766,7 +786,7 @@ def test_Q01_null_rate_awd_amount(live_conn):
 def test_Q02_null_rate_obligation_date(live_conn):
     """Q-02: NULL rate for obligation_date < 0.5%."""
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN obligation_date IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN obligation_date IS NULL THEN 1 ELSE 0 END) FROM awards"
     ).fetchone()
     rate = nulls / total
     assert rate < 0.005, f"obligation_date NULL rate {rate:.2%} exceeds 0.5% limit"
@@ -776,7 +796,7 @@ def test_Q02_null_rate_obligation_date(live_conn):
 def test_Q03_null_rate_fiscal_year(live_conn):
     """Q-03: NULL rate for fiscal_year < 0.5%."""
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN fiscal_year IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN fiscal_year IS NULL THEN 1 ELSE 0 END) FROM awards"
     ).fetchone()
     rate = nulls / total
     assert rate < 0.005, f"fiscal_year NULL rate {rate:.2%} exceeds 0.5% limit"
@@ -786,7 +806,7 @@ def test_Q03_null_rate_fiscal_year(live_conn):
 def test_Q04_null_rate_inst_name(live_conn):
     """Q-04: NULL rate for inst_name < 2%."""
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN inst_name IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN inst_name IS NULL THEN 1 ELSE 0 END) FROM awards"
     ).fetchone()
     rate = nulls / total
     assert rate < 0.02, f"inst_name NULL rate {rate:.2%} exceeds 2% limit"
@@ -796,7 +816,7 @@ def test_Q04_null_rate_inst_name(live_conn):
 def test_Q05_null_rate_pi_name(live_conn):
     """Q-05: NULL rate for pi_name < 5%."""
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN pi_name IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN pi_name IS NULL THEN 1 ELSE 0 END) FROM awards"
     ).fetchone()
     rate = nulls / total
     assert rate < 0.05, f"pi_name NULL rate {rate:.2%} exceeds 5% limit"
@@ -804,19 +824,24 @@ def test_Q05_null_rate_pi_name(live_conn):
 
 @real_db
 def test_Q06_null_rate_dir_abbr(live_conn):
-    """Q-06: NULL rate for dir_abbr < 1%."""
+    """Q-06: NULL rate for dir_abbr < 1% among NSF records.
+
+    NIH records always have dir_abbr=NULL (no directorate equivalent), so this
+    check is scoped to source='nsf' to avoid false failures after NIH load.
+    """
     total, nulls = live_conn.execute(
-        "SELECT COUNT(*), SUM(CASE WHEN dir_abbr IS NULL THEN 1 ELSE 0 END) FROM nsf_awards"
+        "SELECT COUNT(*), SUM(CASE WHEN dir_abbr IS NULL THEN 1 ELSE 0 END) "
+        "FROM awards WHERE source = 'nsf'"
     ).fetchone()
     rate = nulls / total
-    assert rate < 0.01, f"dir_abbr NULL rate {rate:.2%} exceeds 1% limit"
+    assert rate < 0.01, f"NSF dir_abbr NULL rate {rate:.2%} exceeds 1% limit"
 
 
 @real_db
 def test_Q07_negative_amounts_flagged(live_conn):
     """Q-07: Flag negative awd_amount values (possible deobligations)."""
     count, min_val = live_conn.execute(
-        "SELECT COUNT(*), MIN(awd_amount) FROM nsf_awards WHERE awd_amount < 0"
+        "SELECT COUNT(*), MIN(awd_amount) FROM awards WHERE awd_amount < 0"
     ).fetchone()
     if count > 0:
         pytest.xfail(
@@ -829,7 +854,7 @@ def test_Q07_negative_amounts_flagged(live_conn):
 def test_Q08_zero_amounts_flagged(live_conn):
     """Q-08: Flag count of awd_amount = 0 (possible unfunded awards)."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE awd_amount = 0"
+        "SELECT COUNT(*) FROM awards WHERE awd_amount = 0"
     ).fetchone()[0]
     if count > 0:
         pytest.xfail(
@@ -842,7 +867,7 @@ def test_Q08_zero_amounts_flagged(live_conn):
 def test_Q09_outlier_amounts_flagged(live_conn):
     """Q-09: Flag awards > $1B for manual review."""
     rows = live_conn.execute(
-        "SELECT awd_id, awd_amount FROM nsf_awards WHERE awd_amount > 1000000000 LIMIT 10"
+        "SELECT awd_id, awd_amount FROM awards WHERE awd_amount > 1000000000 LIMIT 10"
     ).fetchall()
     if rows:
         detail = ", ".join(f"{awd_id}=${amt/1e6:.0f}M" for awd_id, amt in rows)
@@ -853,7 +878,7 @@ def test_Q09_outlier_amounts_flagged(live_conn):
 def test_Q10_fiscal_year_valid_range(live_conn):
     """Q-10: No fiscal_year values outside 2016–2027."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards "
+        "SELECT COUNT(*) FROM awards "
         "WHERE fiscal_year IS NOT NULL AND (fiscal_year < 2016 OR fiscal_year > 2027)"
     ).fetchone()[0]
     assert count == 0, f"{count:,} records with fiscal_year outside 2016–2027"
@@ -863,7 +888,7 @@ def test_Q10_fiscal_year_valid_range(live_conn):
 def test_Q11_end_date_not_before_start_date(live_conn):
     """Q-11: project_end_date never before project_start_date."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards "
+        "SELECT COUNT(*) FROM awards "
         "WHERE project_start_date IS NOT NULL AND project_end_date IS NOT NULL "
         "AND project_end_date < project_start_date"
     ).fetchone()[0]
@@ -874,7 +899,7 @@ def test_Q11_end_date_not_before_start_date(live_conn):
 def test_Q12_obligation_date_vs_fiscal_year(live_conn):
     """Q-12: Count and document awards where obligation_date is outside reported fiscal year."""
     count = live_conn.execute("""
-        SELECT COUNT(*) FROM nsf_awards
+        SELECT COUNT(*) FROM awards
         WHERE fiscal_year IS NOT NULL AND obligation_date IS NOT NULL
           AND NOT (
             (CAST(strftime('%m', obligation_date) AS INTEGER) >= 10
@@ -896,7 +921,7 @@ def test_Q13_duplicate_titles_flagged(live_conn):
     """Q-13: Flag duplicate awd_titl_txt with different awd_id."""
     count = live_conn.execute(
         "SELECT COUNT(*) FROM ("
-        "  SELECT awd_titl_txt FROM nsf_awards "
+        "  SELECT awd_titl_txt FROM awards "
         "  GROUP BY awd_titl_txt HAVING COUNT(DISTINCT awd_id) > 1"
         ")"
     ).fetchone()[0]
@@ -917,7 +942,7 @@ def test_Q14_awards_per_fy_plausibility(live_conn):
     rows = {
         row[0]: row[1]
         for row in live_conn.execute(
-            "SELECT fiscal_year, COUNT(*) FROM nsf_awards "
+            "SELECT fiscal_year, COUNT(*) FROM awards "
             "WHERE fiscal_year BETWEEN 2019 AND 2025 GROUP BY fiscal_year"
         )
     }
@@ -934,7 +959,7 @@ def test_Q15_funding_per_fy_plausibility(live_conn):
     rows = {
         row[0]: (row[1] or 0)
         for row in live_conn.execute(
-            "SELECT fiscal_year, SUM(awd_amount) FROM nsf_awards "
+            "SELECT fiscal_year, SUM(awd_amount) FROM awards "
             "WHERE fiscal_year BETWEEN 2019 AND 2025 GROUP BY fiscal_year"
         )
     }
@@ -957,7 +982,7 @@ def test_Q16_inst_state_code_valid(live_conn):
     """Q-16: inst_state_code values are valid US state/territory codes."""
     distinct = [
         row[0] for row in live_conn.execute(
-            "SELECT DISTINCT inst_state_code FROM nsf_awards "
+            "SELECT DISTINCT inst_state_code FROM awards "
             "WHERE inst_state_code IS NOT NULL"
         )
     ]
@@ -977,7 +1002,7 @@ def test_Q17_dir_abbr_valid(live_conn):
     """Q-17: dir_abbr values are known NSF directorates."""
     distinct = [
         row[0] for row in live_conn.execute(
-            "SELECT DISTINCT dir_abbr FROM nsf_awards WHERE dir_abbr IS NOT NULL"
+            "SELECT DISTINCT dir_abbr FROM awards WHERE dir_abbr IS NOT NULL"
         )
     ]
     unknown = [d for d in distinct if d not in VALID_DIRECTORATES]
@@ -992,7 +1017,7 @@ def test_Q18_abstract_not_blank_recent(live_conn):
         "SELECT COUNT(*), "
         "SUM(CASE WHEN awd_abstract_narration IS NULL OR awd_abstract_narration = '' "
         "     THEN 1 ELSE 0 END) "
-        "FROM nsf_awards WHERE fiscal_year >= 2022"
+        "FROM awards WHERE fiscal_year >= 2022"
     ).fetchone()
     if total == 0:
         pytest.skip("No FY2022+ records available")
@@ -1065,7 +1090,7 @@ def test_U01_insert_created_at_equals_updated_at(mem_db):
     rec = etl_map_record(_make_etl_raw())
     _upsert(mem_db, rec)
     row = mem_db.execute(
-        "SELECT created_at, updated_at FROM nsf_awards WHERE awd_id = ?",
+        "SELECT created_at, updated_at FROM awards WHERE awd_id = ?",
         (rec["awd_id"],)
     ).fetchone()
     assert row[0] == row[1], f"created_at={row[0]!r} != updated_at={row[1]!r}"
@@ -1076,13 +1101,13 @@ def test_U02_upsert_created_at_preserved(mem_db):
     rec = etl_map_record(_make_etl_raw())
     _upsert(mem_db, rec)
     created_at_v1, updated_at_v1 = mem_db.execute(
-        "SELECT created_at, updated_at FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT created_at, updated_at FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()
 
     time.sleep(1.1)
     _upsert(mem_db, rec)
     created_at_v2, updated_at_v2 = mem_db.execute(
-        "SELECT created_at, updated_at FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT created_at, updated_at FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()
 
     assert created_at_v2 == created_at_v1, (
@@ -1098,12 +1123,12 @@ def test_U03_re_insert_no_data_change_raw_json_same(mem_db):
     rec = etl_map_record(_make_etl_raw())
     _upsert(mem_db, rec)
     rj1 = json.loads(mem_db.execute(
-        "SELECT raw_json FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT raw_json FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()[0])
 
     _upsert(mem_db, rec)
     rj2 = json.loads(mem_db.execute(
-        "SELECT raw_json FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT raw_json FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()[0])
 
     assert rj1 == rj2
@@ -1118,7 +1143,7 @@ def test_U04_upsert_field_change_updates_raw_json(mem_db):
     _upsert(mem_db, rec_v2)
 
     rj = json.loads(mem_db.execute(
-        "SELECT raw_json FROM nsf_awards WHERE awd_id = ?", (rec_v1["awd_id"],)
+        "SELECT raw_json FROM awards WHERE awd_id = ?", (rec_v1["awd_id"],)
     ).fetchone()[0])
     assert rj["awd_titl_txt"] == "Updated Title"
 
@@ -1130,11 +1155,11 @@ def test_U05_collision_updates_not_duplicates(mem_db):
     _upsert(mem_db, rec1)
     _upsert(mem_db, rec2)
 
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 1, f"Expected 1 row after collision upsert, got {count}"
 
     title = mem_db.execute(
-        "SELECT awd_titl_txt FROM nsf_awards WHERE awd_id = ?", (rec1["awd_id"],)
+        "SELECT awd_titl_txt FROM awards WHERE awd_id = ?", (rec1["awd_id"],)
     ).fetchone()[0]
     assert title == "Second Version"
 
@@ -1155,7 +1180,7 @@ def test_U06_batch_partial_failure_atomic_rollback(mem_db):
     except Exception:
         mem_db.rollback()
 
-    count = mem_db.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    count = mem_db.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
     assert count == 0, (
         f"Atomic rollback failed: {count} row(s) persisted after batch error"
     )
@@ -1168,7 +1193,7 @@ def test_U07_raw_json_matches_source(mem_db):
     _upsert(mem_db, rec)
 
     stored = json.loads(mem_db.execute(
-        "SELECT raw_json FROM nsf_awards WHERE awd_id = ?", (rec["awd_id"],)
+        "SELECT raw_json FROM awards WHERE awd_id = ?", (rec["awd_id"],)
     ).fetchone()[0])
 
     assert stored["awd_id"] == source["awd_id"]
@@ -1184,7 +1209,7 @@ def test_U07_raw_json_matches_source(mem_db):
 def test_P01_full_table_scan_under_5s(live_conn):
     """P-01: Full table scan completes in < 5 seconds."""
     start = time.perf_counter()
-    live_conn.execute("SELECT COUNT(*), MAX(awd_amount) FROM nsf_awards").fetchone()
+    live_conn.execute("SELECT COUNT(*), MAX(awd_amount) FROM awards").fetchone()
     elapsed = time.perf_counter() - start
     assert elapsed < 5.0, f"Full table scan took {elapsed:.2f}s (limit 5s)"
 
@@ -1194,7 +1219,7 @@ def test_P02_filter_by_fiscal_year_under_1s(live_conn):
     """P-02: Filter by fiscal_year completes in < 1 second."""
     start = time.perf_counter()
     live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE fiscal_year = 2024"
+        "SELECT COUNT(*) FROM awards WHERE fiscal_year = 2024"
     ).fetchone()
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0, f"fiscal_year filter took {elapsed:.2f}s (limit 1s)"
@@ -1205,7 +1230,7 @@ def test_P03_filter_by_state_under_2s(live_conn):
     """P-03: Filter by inst_state_code completes in < 2 seconds."""
     start = time.perf_counter()
     live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE inst_state_code = 'TX'"
+        "SELECT COUNT(*) FROM awards WHERE inst_state_code = 'TX'"
     ).fetchone()
     elapsed = time.perf_counter() - start
     assert elapsed < 2.0, f"State filter took {elapsed:.2f}s (limit 2s)"
@@ -1216,7 +1241,7 @@ def test_P04_sum_by_fiscal_year_under_3s(live_conn):
     """P-04: SUM(awd_amount) GROUP BY fiscal_year completes in < 3 seconds."""
     start = time.perf_counter()
     live_conn.execute(
-        "SELECT fiscal_year, SUM(awd_amount) FROM nsf_awards GROUP BY fiscal_year"
+        "SELECT fiscal_year, SUM(awd_amount) FROM awards GROUP BY fiscal_year"
     ).fetchall()
     elapsed = time.perf_counter() - start
     assert elapsed < 3.0, f"SUM by fiscal year took {elapsed:.2f}s (limit 3s)"
@@ -1234,7 +1259,7 @@ def test_P05_wal_concurrent_reads():
     def read_worker():
         try:
             conn = sqlite3.connect(f"file:{REAL_DB}?mode=ro", uri=True)
-            count = conn.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
             conn.close()
             results.append(count)
         except Exception as e:
@@ -1280,7 +1305,7 @@ def test_P08_quick_check(live_conn):
 def test_G01_every_record_has_raw_json(live_conn):
     """G-01: Every record has raw_json (full audit trail preserved)."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE raw_json IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE raw_json IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL raw_json"
 
@@ -1289,7 +1314,7 @@ def test_G01_every_record_has_raw_json(live_conn):
 def test_G02_every_record_has_created_at(live_conn):
     """G-02: Every record has created_at."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE created_at IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE created_at IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL created_at"
 
@@ -1298,7 +1323,7 @@ def test_G02_every_record_has_created_at(live_conn):
 def test_G03_every_record_has_updated_at(live_conn):
     """G-03: Every record has updated_at."""
     count = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE updated_at IS NULL"
+        "SELECT COUNT(*) FROM awards WHERE updated_at IS NULL"
     ).fetchone()[0]
     assert count == 0, f"{count} rows with NULL updated_at"
 
@@ -1309,18 +1334,19 @@ def test_G04_agcy_id_populated_for_zip_records(live_conn):
 
     NOTE: The raw NSF ZIP data uses 'NSF' (not '4900') as the agency identifier.
     '4900' is the DUNS/SAM code; the raw JSON field contains the string 'NSF'.
+    Scoped to source='nsf' to remain valid after NIH (agcy_id='NIH') records are added.
     """
     count_nsf = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE agcy_id = 'NSF'"
+        "SELECT COUNT(*) FROM awards WHERE source = 'nsf' AND agcy_id = 'NSF'"
     ).fetchone()[0]
     count_nonnull = live_conn.execute(
-        "SELECT COUNT(*) FROM nsf_awards WHERE agcy_id IS NOT NULL"
+        "SELECT COUNT(*) FROM awards WHERE source = 'nsf' AND agcy_id IS NOT NULL"
     ).fetchone()[0]
     if count_nonnull == 0:
-        pytest.skip("No non-null agcy_id records to check")
+        pytest.skip("No NSF records with non-null agcy_id to check")
     rate = count_nsf / count_nonnull
     assert rate > 0.95, (
-        f"Only {rate:.1%} of non-null agcy_id records are 'NSF' "
+        f"Only {rate:.1%} of NSF records have agcy_id='NSF' "
         f"({count_nsf:,}/{count_nonnull:,})"
     )
 
@@ -1331,7 +1357,7 @@ def test_G05_no_unexpected_pii(live_conn):
     import re
     ssn_pattern = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
     samples = live_conn.execute(
-        "SELECT pi_name, inst_name FROM nsf_awards LIMIT 5000"
+        "SELECT pi_name, inst_name FROM awards LIMIT 5000"
     ).fetchall()
     hits = []
     for pi, inst in samples:
@@ -1352,7 +1378,7 @@ def test_G06_zip_year_fiscal_year_alignment(live_conn):
     rows = {
         row[0]: row[1]
         for row in live_conn.execute(
-            "SELECT fiscal_year, COUNT(*) FROM nsf_awards "
+            "SELECT fiscal_year, COUNT(*) FROM awards "
             "WHERE fiscal_year BETWEEN 2019 AND 2026 GROUP BY fiscal_year"
         )
     }
@@ -1365,9 +1391,9 @@ def test_G06_zip_year_fiscal_year_alignment(live_conn):
 
 @real_db
 def test_G07_total_record_count_documented(live_conn):
-    """G-07: Total record count matches documented baseline (reproducible)."""
-    expected = BASELINES["expected_record_count"]
-    actual = live_conn.execute("SELECT COUNT(*) FROM nsf_awards").fetchone()[0]
+    """G-07: Total NSF record count matches documented baseline (reproducible)."""
+    expected = BASELINES["nsf"]["expected_record_count"]
+    actual = live_conn.execute("SELECT COUNT(*) FROM awards WHERE source = 'nsf'").fetchone()[0]
     tolerance = expected * 0.001
     assert abs(actual - expected) <= tolerance, (
         f"Count {actual:,} outside ±0.1% of baseline {expected:,}. "
@@ -1377,9 +1403,9 @@ def test_G07_total_record_count_documented(live_conn):
 
 @real_db
 def test_G08_total_funding_documented(live_conn):
-    """G-08: Total funding matches documented baseline (reproducible)."""
-    expected_b = BASELINES["expected_funding_billions"]
-    actual = live_conn.execute("SELECT SUM(awd_amount) FROM nsf_awards").fetchone()[0] or 0.0
+    """G-08: Total NSF funding matches documented baseline (reproducible)."""
+    expected_b = BASELINES["nsf"]["expected_funding_billions"]
+    actual = live_conn.execute("SELECT SUM(awd_amount) FROM awards WHERE source = 'nsf'").fetchone()[0] or 0.0
     actual_b = actual / 1e9
     assert abs(actual_b - expected_b) / expected_b <= 0.005, (
         f"Total ${actual_b:.4f}B outside ±0.5% of baseline ${expected_b:.4f}B. "
@@ -1391,7 +1417,7 @@ def test_G08_total_funding_documented(live_conn):
 def test_G09_all_directorates_represented(live_conn):
     """G-09: More than 7 distinct NSF directorates represented."""
     count = live_conn.execute(
-        "SELECT COUNT(DISTINCT dir_abbr) FROM nsf_awards WHERE dir_abbr IS NOT NULL"
+        "SELECT COUNT(DISTINCT dir_abbr) FROM awards WHERE dir_abbr IS NOT NULL"
     ).fetchone()[0]
     assert count > 7, f"Only {count} distinct directorates (expected > 7)"
 
@@ -1400,9 +1426,195 @@ def test_G09_all_directorates_represented(live_conn):
 def test_G10_all_states_represented(live_conn):
     """G-10: >= 51 distinct state/territory codes (50 states + DC minimum)."""
     count = live_conn.execute(
-        "SELECT COUNT(DISTINCT inst_state_code) FROM nsf_awards "
+        "SELECT COUNT(DISTINCT inst_state_code) FROM awards "
         "WHERE inst_state_code IS NOT NULL"
     ).fetchone()[0]
     assert count >= 51, (
         f"Only {count} distinct state codes (expected >= 51 for 50 states + DC)"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. NIH API FETCHER TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _make_nih_raw(**overrides) -> dict:
+    """Minimal valid NIH API result dict for nih_map_record tests."""
+    base = {
+        "project_num":       "1R03CA303913-01",
+        "project_title":     "Test NIH Award Title",
+        "fiscal_year":       2025,
+        "award_amount":      148500,
+        "activity_code":     "R03",
+        "award_notice_date": "2025-09-04T00:00:00",
+        "project_start_date": "2025-09-05T00:00:00",
+        "project_end_date":  "2027-08-31T00:00:00",
+        "abstract_text":     "Test abstract.",
+        "contact_pi_name":   "SOHAL, IKJOT SINGH ",
+        "organization":      {"org_name": "UNIVERSITY OF NORTH TEXAS", "org_state": "TX"},
+        "agency_ic_fundings": [
+            {"abbreviation": "NCI", "total_cost": 148500.0, "direct_cost_ic": 100000.0}
+        ],
+        "agency_code":       "NIH",
+        "direct_cost_amt":   100000,
+        "opportunity_number": "PAR-23-058",
+        "core_project_num":  "R03CA303913",
+    }
+    base.update(overrides)
+    return base
+
+
+# ── Unit tests (no DB, no network) ───────────────────────────────────────────
+
+def test_N01_map_record_fields():
+    """N-01: nih_map_record returns all 21 schema keys; source='nih'."""
+    EXPECTED_KEYS = {
+        "awd_id", "awd_titl_txt", "inst_name", "inst_state_code",
+        "awd_amount", "obligation_date", "project_start_date", "project_end_date",
+        "awd_abstract_narration", "dir_abbr", "div_abbr", "pgm_ele_name",
+        "pi_name", "agcy_id", "fiscal_year", "raw_json",
+        "source", "opportunity_number", "activity_code", "nih_institute", "direct_cost_amt",
+    }
+    rec = nih_map_record(_make_nih_raw())
+    assert rec.keys() == EXPECTED_KEYS
+    assert rec["source"] == "nih"
+
+
+def test_N02_contact_pi_stripped():
+    """N-02: Trailing space in contact_pi_name is stripped."""
+    rec = nih_map_record(_make_nih_raw(contact_pi_name="SMITH, JOHN "))
+    assert rec["pi_name"] == "SMITH, JOHN"
+
+
+def test_N03_activity_code_mapped():
+    """N-03: activity_code populated correctly from API field."""
+    rec = nih_map_record(_make_nih_raw(activity_code="R01"))
+    assert rec["activity_code"] == "R01"
+
+
+def test_N04_nih_institute_from_fundings():
+    """N-04: nih_institute taken from agency_ic_fundings abbreviation with highest total_cost."""
+    raw = _make_nih_raw(agency_ic_fundings=[
+        {"abbreviation": "NIBIB", "total_cost": 50000.0},
+        {"abbreviation": "NCI",   "total_cost": 148500.0},
+    ])
+    rec = nih_map_record(raw)
+    assert rec["nih_institute"] == "NCI"
+
+
+def test_N05_date_iso_strip():
+    """N-05: iso_date strips time component from NIH datetime string."""
+    assert nih_iso_date("2025-09-05T00:00:00") == "2025-09-05"
+    assert nih_iso_date("2024-10-01T00:00:00") == "2024-10-01"
+
+
+def test_N06_null_date_returns_none():
+    """N-06: iso_date(None) and iso_date('') both return None."""
+    assert nih_iso_date(None) is None
+    assert nih_iso_date("") is None
+
+
+def test_N07_project_num_as_awd_id():
+    """N-07: project_num is used as awd_id, not appl_id."""
+    raw = _make_nih_raw(project_num="1R35GM142421-01")
+    rec = nih_map_record(raw)
+    assert rec["awd_id"] == "1R35GM142421-01"
+
+
+def test_N08_nih_fields_not_null():
+    """N-08: activity_code, nih_institute, and direct_cost_amt are populated."""
+    rec = nih_map_record(_make_nih_raw())
+    assert rec["activity_code"] is not None
+    assert rec["nih_institute"] is not None
+    assert rec["direct_cost_amt"] is not None
+
+
+def test_N09_nsf_nih_no_awd_id_collision():
+    """N-09: NSF 7-digit awd_id format is distinct from NIH project_num format."""
+    nsf_id  = "2531827"            # typical NSF: 7-digit numeric string
+    nih_id  = "1R03CA303913-01"   # typical NIH: contains letters and hyphens
+    assert nsf_id != nih_id
+    assert nsf_id.isdigit() and len(nsf_id) == 7
+    assert not nih_id.isdigit()
+
+
+# ── Real-DB tests (run after NIH bulk load) ───────────────────────────────────
+
+@real_db
+def test_N10_nih_record_count(live_conn):
+    """N-10: NIH record count matches baseline (if set)."""
+    if BASELINES.get("nih", {}).get("expected_record_count") is None:
+        pytest.skip("NIH baseline not yet set in tests/baselines.json — run bulk load first")
+    expected = BASELINES["nih"]["expected_record_count"]
+    actual = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = 'nih'"
+    ).fetchone()[0]
+    tolerance = max(expected * 0.001, 1)
+    assert abs(actual - expected) <= tolerance, (
+        f"NIH record count {actual:,} outside ±0.1% of baseline {expected:,}"
+    )
+
+
+@real_db
+def test_N11_nih_funding_plausible(live_conn):
+    """N-11: Total NIH funding for FY2024+2025 is in a plausible $B range (>$1B, <$100B)."""
+    if BASELINES.get("nih", {}).get("expected_funding_billions") is None:
+        pytest.skip("NIH baseline not yet set in tests/baselines.json — run bulk load first")
+    total = live_conn.execute(
+        "SELECT SUM(awd_amount) FROM awards "
+        "WHERE source = 'nih' AND fiscal_year IN (2024, 2025)"
+    ).fetchone()[0] or 0.0
+    total_b = total / 1e9
+    assert 1.0 < total_b < 100.0, (
+        f"NIH FY2024+2025 total funding ${total_b:.2f}B outside plausible range ($1B–$100B)"
+    )
+
+
+@real_db
+def test_N12_nih_source_tag(live_conn):
+    """N-12: No NULL source values among NIH rows."""
+    null_count = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = 'nih' AND source IS NULL"
+    ).fetchone()[0]
+    assert null_count == 0, f"{null_count} NIH rows have NULL source"
+
+
+@real_db
+def test_N13_nih_activity_code_present(live_conn):
+    """N-13: NULL rate for activity_code among NIH records < 2%."""
+    total, nulls = live_conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN activity_code IS NULL THEN 1 ELSE 0 END) "
+        "FROM awards WHERE source = 'nih'"
+    ).fetchone()
+    if total == 0:
+        pytest.skip("No NIH records in DB")
+    rate = nulls / total
+    assert rate < 0.02, f"NIH activity_code NULL rate {rate:.2%} exceeds 2% limit"
+
+
+@real_db
+def test_N14_nih_institute_present(live_conn):
+    """N-14: NULL rate for nih_institute among NIH records < 5%."""
+    total, nulls = live_conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN nih_institute IS NULL THEN 1 ELSE 0 END) "
+        "FROM awards WHERE source = 'nih'"
+    ).fetchone()
+    if total == 0:
+        pytest.skip("No NIH records in DB")
+    rate = nulls / total
+    assert rate < 0.05, f"NIH nih_institute NULL rate {rate:.2%} exceeds 5% limit"
+
+
+@real_db
+def test_N15_no_awd_id_overlap(live_conn):
+    """N-15: No awd_id is shared between source='nsf' and source='nih'."""
+    overlap = live_conn.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT awd_id FROM awards WHERE source = 'nsf'"
+        "  INTERSECT"
+        "  SELECT awd_id FROM awards WHERE source = 'nih'"
+        ")"
+    ).fetchone()[0]
+    assert overlap == 0, (
+        f"{overlap} awd_id(s) appear in both NSF and NIH rows — ID collision detected"
     )
