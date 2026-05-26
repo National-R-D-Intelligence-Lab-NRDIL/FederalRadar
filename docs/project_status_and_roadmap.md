@@ -1,386 +1,177 @@
-# Federal Radar — Project Status, Test Results & Multi-Agency Roadmap
+# Federal Radar — Project Status & Roadmap
 
-**Last updated:** 2026-05-23
-**Author:** Federal Radar Development Team
-**Status:** NSF phase complete — ready for multi-agency expansion
+**Last updated:** 2026-05-26
+**Status:** Data pipeline complete — API and UI layer is next
 
 ---
 
-## 1. Where We Are
+## 1. Current State
 
-The Federal Radar project successfully ingests, validates, and stores NSF federal
-award data from two independent sources — bulk ZIP archives and the live NSF public
-API — into a single auditable SQLite database.
+Federal Radar ingests federal award data from 9 sources into a single SQLite database.
+The data pipeline, deduplication logic, and daily refresh scheduler are complete.
+No front-end exists yet — the DB is queried directly for internal validation.
 
-### What Was Completed
+### Database Snapshot
+
+| Source | Records | Total Funding | FY Range |
+|---|---|---|---|
+| NSF | 83,845 | $49.95B | FY2019–2026 |
+| NIH | 453,631 | $223.13B | FY2019–2026 |
+| DOD | 26,408 | $31.65B | FY2019–2026 |
+| USDA | 27,276 | $18.38B | FY2019–2026 |
+| NASA | 17,424 | $10.63B | FY2019–2026 |
+| DOE | 10,395 | $24.43B | FY2019–2026 |
+| Commerce | 6,749 | $11.55B | FY2019–2026 |
+| EPA | 1,595 | $2.46B | FY2019–2026 |
+| DHS | 150 | $0.32B | FY2019 only |
+| **Total** | **627,473** | **$372.50B** | **FY2019–2026** |
+
+---
+
+## 2. Completed Milestones
 
 | Milestone | Status |
 |---|---|
-| NSF ZIP bulk ETL (`nsf_etl.py`) | Complete |
-| NSF API incremental sync (`nsf_api_fetcher.py`) | Complete |
-| ZIP vs API cross-source validation (`nsf_verify.py`) | Complete |
-| Comprehensive test suite (102 tests, 9 governance pillars) | Complete |
-| `created_at` audit trail bug fix | Complete |
-| Data governance documentation | Complete |
+| NSF bulk ZIP ETL | Complete |
+| NSF incremental API sync | Complete |
+| NIH RePORTER API fetcher | Complete |
+| USASpending bulk download (7 agencies, FY2019–2026) | Complete |
+| Parallel download execution | Complete |
+| Crash-safe sentinel files | Complete |
+| Multi-year award deduplication fix | Complete |
+| Upsert: fiscal_year never overwritten | Complete |
+| Upsert: awd_amount takes max (latest total) | Complete |
+| APScheduler daily refresh (NSF + NIH) | Complete |
+| Data governance test suite (NSF) | Complete (NSF only) |
+| Railway deployment config | Complete |
 
-### Current Database Snapshot (as of 2026-05-23)
+---
 
-| Metric | Value |
+## 3. Known Gaps & Issues
+
+### Data Gaps
+| Gap | Notes |
 |---|---|
-| Total records | 83,845 |
-| Total funding | ~$49.95B |
-| Fiscal years covered | FY2019 – FY2026 (FY2026 partial) |
-| DB size | ~1.65 GB (WAL mode) |
-| Agency | NSF only |
-| DB location | `data/federal_awards.db` |
+| DHS FY2020–2026 | Bulk download takes 20+ min/year on USASpending servers. FY2019 loaded (150 records). Run as overnight job when ready. |
+| NIH amounts are per-year, not total | NIH `awd_amount` = one budget period slice. NSF and USASpending `awd_amount` = total award. Not directly comparable. See FUTURE_FEATURES.txt. |
+| Test suite covers NSF only | `test_data_governance.py` and `baselines.json` need NIH and USASpending coverage added |
 
-**Fiscal year breakdown:**
-
-| Fiscal Year | Awards | Total Funding |
-|---|---|---|
-| FY2019 | 12,180 | $7,131.2M |
-| FY2020 | 13,041 | $7,506.7M |
-| FY2021 | 12,161 | $8,200.6M |
-| FY2022 | 11,907 | $7,333.0M |
-| FY2023 | 12,022 | $7,521.2M |
-| FY2024 | 11,687 | $6,753.9M |
-| FY2025 | 9,249 | $4,847.3M |
-| FY2026 | 1,588 | $656.4M (partial) |
-| NULL date | 10 | ~$0 |
+### Test Suite
+The governance test suite (`tests/test_data_governance.py`) was written when only NSF
+data existed. It needs updating to:
+- Add NIH record count and funding baselines
+- Add USASpending per-agency baselines
+- Add cross-source consistency checks
+- Update `VALID_DIRECTORATES` to include post-2022 NSF restructuring codes: `CSE`, `O/D`, `IRM`, `BFA`, `NSB`, `OCIO`
 
 ---
 
-## 2. Test Suite Results — What They Mean
+## 4. Recommended Additional Data Sources for VPRI Offices
 
-The test suite lives at `tests/test_data_governance.py` and covers 9 governance
-pillars with 102 tests. Run it with:
+These are publicly available federal sources not yet in the system. Prioritized by
+relevance to university research offices.
 
-```bash
-# Offline (no network calls)
-pytest tests/test_data_governance.py -v
+### Tier 1 — High Priority (Major University Funders)
 
-# Full run including live NSF API checks
-FEDERAL_RADAR_NETWORK_TESTS=1 pytest tests/test_data_governance.py -v
-```
+**Grants.gov (Opportunities API)**
+- What: Open federal grant solicitations (FOAs, RFPs, NOFAs) — the forward-looking "radar"
+- Why critical: This is WHERE opportunities are posted before awards are made. Currently we only track awards after the fact. Adding Grants.gov turns Federal Radar into an actual opportunity alert system.
+- API: `https://apply07.grants.gov/grantsws/rest/opportunities/search/`
+- Data: Agency, CFDA number, open/close dates, eligibility, synopsis
+- Source type: Opportunities, not awards — different schema needed
 
-### Summary (full run with network)
+**Department of Education (ED)**
+- What: Higher Education Act programs, FIPSE, research competitions, TRIO, GEAR UP
+- Why: Direct university funder — Title IV, graduate research, HBCU/MSI programs
+- Source: USASpending bulk download (agency = "Department of Education")
+- Easy add: Same pipeline as existing agencies, just add ED to AGENCIES dict
 
-| Result | Count | Meaning |
-|---|---|---|
-| PASSED | 95 | Governance requirement satisfied |
-| XFAILED | 6 | Known, documented data conditions (not failures) |
-| SKIPPED | 0 | (All network tests ran) |
-| FAILED | 0 | None |
+**Department of Transportation (DOT)**
+- What: University Transportation Centers (UTC) program, research grants
+- Why: UTC is a flagship university R&D program, ~$75M/year to university consortia
+- Source: USASpending bulk download (agency = "Department of Transportation")
+- Easy add: Same pipeline
 
-### The 6 XFAILED Tests — Explained
+**Health and Human Services — Non-NIH (HRSA, AHRQ, SAMHSA, ACF)**
+- What: Health workforce research (HRSA), health services research (AHRQ), substance abuse (SAMHSA), social services (ACF)
+- Why: Large funding stream often missed because people think "HHS = NIH only"
+- Source: USASpending bulk download (agency = "Department of Health and Human Services")
+- Note: Need to exclude NIH records to avoid double-counting
 
-These are not bugs. They are data governance flags that surfaced during testing
-and are documented here for VPR stakeholders.
+**National Endowment for the Humanities (NEH)**
+- What: Humanities research, digital humanities, preservation
+- Why: Critical for universities with strong humanities programs — often invisible in STEM-focused grant dashboards
+- Source: USASpending bulk download (agency = "National Endowment for the Humanities")
+- Easy add: Same pipeline, low volume
 
-#### S-07 — Non-Standard Award ID Format
-**Finding:** 10 award IDs do not match the standard 7-digit numeric format.
-Example IDs: `49100421C0035`, `49100421C0036`, etc.
-**Explanation:** These are contract-style awards (SBIR/contract vehicles) where the
-award identifier follows a federal contract numbering convention rather than NSF's
-standard grant numbering. They are valid federal award records.
-**Action required:** Confirm with NSF whether these should be treated as grants or
-contracts in the data model. Add a `record_type` field (`grant` / `contract`) if needed.
+### Tier 2 — Valuable for Comprehensive Coverage
 
-#### Q-08 — Zero-Amount Awards
-**Finding:** Some awards have `awd_amount = 0.0`.
-**Explanation:** These are likely unfunded placeholder records or awards where
-obligation has not yet occurred. Common in federal contracting.
-**Action required:** Filter these out of funding totals presented to VPR. Do not
-delete — they are legitimate records.
+**SBIR/STTR (sbir.gov)**
+- What: Small business R&D awards — but many flow through university spin-offs, tech transfer, and faculty startups
+- Why: Technology transfer offices and innovation centers track these closely
+- API: `https://api.sbir.gov/public/api/`
+- Note: Separate schema needed — company-focused, not institution-focused
 
-#### Q-13 — Duplicate Award Titles Across Different Award IDs
-**Finding:** Some `awd_titl_txt` values appear with more than one `awd_id`.
-**Explanation:** Legitimate — NSF issues multiple awards under the same program
-title (e.g., conference grants, equipment awards). Not a data integrity issue.
-**Action required:** None. Document for VPR so they understand counts vs. unique
-project titles.
+**Department of Justice (DOJ)**
+- What: Criminology, forensics, cybersecurity, public policy research
+- Why: Significant funder for social science and law school research
+- Source: USASpending bulk download
 
-#### Q-16 — Non-Standard State Codes
-**Finding:** Some `inst_state_code` values fall outside the standard 50-state + DC
-+ territory set.
-**Explanation:** These are international institutions (foreign universities
-receiving NSF subawards) or records with data entry anomalies in the NSF source.
-**Action required:** For state-level analysis, filter `WHERE inst_state_code IN
-(known_set)`. Flag international records separately.
+**USAID**
+- What: International development research, global health, food security
+- Why: Large funder for universities with international programs
+- Source: USASpending bulk download
 
-#### Q-17 — Unrecognized Directorate Abbreviations
-**Finding:** Some `dir_abbr` values are not in the expected set (e.g., `CSE`, `O/D`,
-`IRM`, `BFA`, `NSB`, `OCIO`).
-**Explanation:** NSF reorganized its directorate structure in 2022 (CISE became CSE,
-new TIP directorate was created). The known-set in the test predates this. The data
-is correct; the test's reference set needs updating.
-**Action required:** Update `VALID_DIRECTORATES` in the test file to include current
-NSF directorate codes: `CSE`, `O/D`, `IRM`, `BFA`, `NSB`, `OCIO`, `NNCO`, `NCO`.
+**Department of Veterans Affairs (VA)**
+- What: Biomedical and health research, mental health, rehabilitation
+- Why: VA research is heavily university-partnered; often under-tracked
+- Source: USASpending bulk download
 
-#### C-04/C-05 — ZIP-Only and API-Only Awards
-**Finding:** For a 3-month window (Jan–Mar 2025), some award IDs appear in the ZIP
-but not the API and vice versa.
-**Explanation:** Expected. The ZIP is a historical snapshot; the API reflects the
-current authoritative state. Awards can be amended, withdrawn, or newly posted
-between the two sources.
-**Action required:** Awards present in API but not ZIP should be captured via
-incremental API sync. Awards present in ZIP but not API should be reviewed — they
-may be retracted or amended awards.
+### Tier 3 — Specialized / Future Consideration
 
-### One Transient API Failure (Not a Data Issue)
+**National Endowment for the Arts (NEA)**
+- Small but relevant for arts and design programs
 
-**C-03 — FY2025 Funding Variance** fails intermittently with `HTTP 502` when the
-NSF API is asked to paginate through all ~9,000 FY2025 records in a single date
-range. This is an NSF API infrastructure limitation (it times out on large
-paginations). The test now marks this as `xfail` on 502 errors rather than failing.
-**Action required:** Add retry logic with exponential backoff to
-`nsf_api_fetcher.fetch_page()` for production hardening.
+**FEMA / Emergency Management**
+- Hazard mitigation and resilience research — growing post-climate awareness
+
+**IARPA (Intelligence Advanced Research Projects Activity)**
+- Cutting-edge CS, social science, and neuroscience research
+- Included in DOD/intelligence community USASpending data
+
+**Private Foundations (Future — Phase 3)**
+- Gates Foundation, Mellon, MacArthur, Sloan, Simons, Moore
+- NOT in federal systems — requires separate integrations or partnerships
+- Candid (Foundation Directory) has an API but requires paid subscription
 
 ---
 
-## 3. Bug Fixed — `created_at` Audit Trail Preservation
+## 5. Phase Roadmap
 
-**Problem:** The original upsert used `INSERT OR REPLACE`, which is a DELETE +
-INSERT under the hood. This silently reset `created_at` to the current timestamp
-on every update, destroying the audit trail.
+### Phase 1 — Internal VPR Validation (Current)
+- [x] Data pipeline (NSF, NIH, 7 USASpending agencies)
+- [x] Data model correctness (deduplication, fiscal_year, amounts)
+- [ ] Fix test suite to cover NIH + USASpending
+- [ ] Add ED, DOT, HHS-non-NIH to USASpending pipeline (easy adds)
+- [ ] Update docs to current state (this file)
 
-**Fix applied in `src/db.py`:**
+### Phase 2 — Internal Tool (Query + Search)
+- [ ] REST API layer (FastAPI or Flask) — search by institution, agency, FY, keyword
+- [ ] Basic internal dashboard — table view, filters, export to CSV
+- [ ] Grant detail page with source permalink
+- [ ] Grants.gov opportunity feed (forward-looking alerts)
+- [ ] Fix NIH amount labeling in UI
 
-```sql
--- Before (resets created_at on every update)
-INSERT OR REPLACE INTO nsf_awards (...) VALUES (...);
-
--- After (preserves created_at; only updates updated_at)
-INSERT INTO nsf_awards (..., created_at, updated_at)
-VALUES (..., CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-ON CONFLICT(awd_id) DO UPDATE SET
-    awd_titl_txt = excluded.awd_titl_txt,
-    ...
-    updated_at = CURRENT_TIMESTAMP;
-    -- created_at is NOT in the ON CONFLICT SET clause → preserved
-```
-
-**Test confirming the fix:** `test_U02_upsert_created_at_preserved` (PASSED).
-
-**Important note for existing records:** Records already in the database before
-this fix have accurate `created_at` values only if they were never re-upserted
-after the initial load. If a full reload is performed, `created_at` will be reset
-to the reload date. For federal audit trail purposes, this should be noted in any
-data provenance documentation provided to VPR.
+### Phase 3 — Pilot to Other Institutions
+- [ ] Multi-institution support (institution filter as first-class concept)
+- [ ] Benchmarking — compare institution vs. peer institutions
+- [ ] Opportunity alerts / email digest
+- [ ] User accounts and saved searches
+- [ ] Private foundation data (Candid API or equivalent)
 
 ---
 
-## 4. Known Data Characteristics (For VPR Stakeholders)
+## 6. Technical Reference
 
-Before sharing data with the VPR office, communicate these findings:
-
-### FY2016–2018 Gap
-ZIP files for 2016–2018 exist in `data/raw/nsf/` and were loaded, but the awards
-in those archives have `obligation_date` values that map to **FY2019 and later**.
-This means the oldest records in the database are FY2019, not FY2016. This is a
-characteristic of the NSF source data, not a loading error. FY2016–2018 awards may
-have been funded in later years, or the NSF release schedule for those archives
-covers later-dated amendments.
-
-### NULL Rates (All Well Within Thresholds)
-
-| Field | NULL Rate | Threshold |
-|---|---|---|
-| `awd_amount` | 0.01% | < 1% |
-| `obligation_date` | 0.01% | < 0.5% |
-| `fiscal_year` | 0.01% | < 0.5% |
-| `inst_name` | 0.00% | < 2% |
-| `pi_name` | 0.00% | < 5% |
-| `dir_abbr` | 0.00% | < 1% |
-| `raw_json` | 0.00% | Must be 0% |
-
-### Data Completeness
-- All 50 states + DC + territories are represented in `inst_state_code`
-- 15 distinct directorate codes are present
-- `raw_json` is populated for every record — full audit trail intact
-- No SSN-like patterns found in PI name or institution name fields
-
----
-
-## 5. Multi-Agency Expansion Roadmap
-
-### Recommended Order: NIH → NASA → DOD
-
----
-
-### Agency 1: NIH (National Institutes of Health)
-
-**Why first:** NIH Reporter API is well-documented, JSON-native, and directly
-analogous to the NSF API. Fastest path to a second agency.
-
-**Data Sources:**
-- Bulk: NIH ExPORTER — `https://reporter.nih.gov/exporter`
-  (annual CSV files, free download, no authentication)
-- API: NIH Reporter API — `https://api.reporter.nih.gov/v2/projects/search`
-  (POST-based JSON API, no key required, 500 records/page)
-
-**Key field mapping:**
-
-| NIH Field | DB Column | Notes |
-|---|---|---|
-| `appl_id` | `awd_id` | NIH application ID (7-8 digits) |
-| `project_title` | `awd_titl_txt` | |
-| `org_name` | `inst_name` | |
-| `org_state` | `inst_state_code` | |
-| `award_amount` | `awd_amount` | Already a number, no conversion needed |
-| `project_start_date` | `obligation_date` | ISO format |
-| `project_start_date` | `project_start_date` | |
-| `project_end_date` | `project_end_date` | |
-| `abstract_text` | `awd_abstract_narration` | |
-| `agency_ic_admin.abbreviation` | `dir_abbr` | NIH Institute code (e.g., NIMH, NCI) |
-| `pi_names[0].full_name` | `pi_name` | |
-| `"NIH"` | `agcy_id` | Hardcoded |
-
-**Fiscal year rule:** Same federal Oct 1 standard. NIH fiscal year runs Oct 1 – Sep 30.
-
-**Steps:**
-1. Download NIH ExPORTER CSV for FY2019–FY2025 from `reporter.nih.gov/exporter`
-2. Write `scripts/nih_etl.py` with `map_record()` matching the field table above
-3. Write `scripts/nih_api_fetcher.py` using the Reporter API POST endpoint
-4. Run ETL; update `tests/baselines.json` with NIH record count and funding total
-5. Add NIH sections to `tests/test_data_governance.py`
-
-**Expected volume:** ~50,000–80,000 awards per year across all institutes.
-
----
-
-### Agency 2: NASA (National Aeronautics and Space Administration)
-
-**Data Sources:**
-- Bulk: USASpending.gov awards download — `https://usaspending.gov/download_center/award_data_archive`
-  (filter by `awarding_agency_name = "National Aeronautics and Space Administration"`)
-- API: USASpending API — `https://api.usaspending.gov/api/v2/search/spending_by_award/`
-
-**Key field mapping differences from NSF:**
-
-| USASpending Field | DB Column | Notes |
-|---|---|---|
-| `award_id` | `awd_id` | May be alphanumeric (contract numbers) |
-| `recipient_name` | `inst_name` | |
-| `recipient_location_state_code` | `inst_state_code` | |
-| `total_obligated_amount` | `awd_amount` | |
-| `action_date` | `obligation_date` | Already ISO |
-| `period_of_performance_start_date` | `project_start_date` | |
-| `period_of_performance_current_end_date` | `project_end_date` | |
-| `awarding_sub_agency_name` | `dir_abbr` | NASA center name |
-| `"NASA"` | `agcy_id` | Hardcoded |
-
-**Note:** NASA awards include both **grants** (to universities) and **contracts**
-(to companies). Grants use a different ID format than contracts. A `record_type`
-column may be needed to distinguish them.
-
-**Steps:**
-1. Download USASpending bulk CSV filtered to NASA for FY2019–FY2025
-2. Write `scripts/nasa_etl.py`
-3. Note: USASpending API has rate limits — add a 0.5s delay between pages
-4. Add NASA sections to the test suite
-
----
-
-### Agency 3: DOD (Department of Defense)
-
-**Why last:** Highest volume, most complex. DOD awards include R&D grants (DARPA,
-ONR, ARO, AFOSR) and contracts (which have very different data structures).
-
-**Data Sources:**
-- Bulk: USASpending.gov (same as NASA, filter by DOD agencies)
-- API: USASpending API (same endpoint)
-- Supplemental: SBIR.gov for small business R&D awards specifically
-
-**Key complexity:**
-- DOD has many sub-agencies: DARPA, ONR, AFOSR, ARO, DTRA, etc.
-- `dir_abbr` should map to sub-agency abbreviation, not "DOD"
-- Contract awards and grant awards have different schema requirements
-- Volume is very large — consider a separate DB or partitioned table
-
-**Steps:**
-1. Scope to R&D grants only first (filter `award_type` = `02`, `03`, `04` in USASpending)
-2. Write `scripts/dod_etl.py` with sub-agency mapping table
-3. Consider a `record_type` column (`grant` / `contract`) before loading DOD data
-4. Add DOD sections to the test suite
-
----
-
-### Schema Changes Needed Before First New Agency Load
-
-**1. Add `data_source` column** to track which script loaded each record:
-
-```sql
-ALTER TABLE nsf_awards ADD COLUMN data_source TEXT;
--- Values: 'NSF_ZIP_2019', 'NSF_ZIP_2020', ..., 'NSF_API', 'NIH_EXPORTER', 'NIH_API', etc.
-```
-
-**2. Rename `nsf_awards` to `federal_awards`** (or keep separate tables):
-
-```sql
--- Option A: Single unified table (simpler for cross-agency queries)
-ALTER TABLE nsf_awards RENAME TO federal_awards;
-
--- Option B: Separate tables per agency (simpler ETL, harder cross-agency queries)
--- Keep nsf_awards, create nih_awards, nasa_awards, dod_awards
-```
-
-Recommendation: **Option A (unified table)** — the schema already has `agcy_id`
-as a discriminator, and the VPR use case requires cross-agency comparison queries.
-
-**3. Update `tests/baselines.json`** to be agency-keyed:
-
-```json
-{
-  "NSF": {
-    "expected_record_count": 83845,
-    "expected_funding_billions": 49.9502,
-    "fiscal_year_range": [2019, 2026]
-  },
-  "NIH": {
-    "expected_record_count": 0,
-    "expected_funding_billions": 0,
-    "fiscal_year_range": [2019, 2026]
-  }
-}
-```
-
----
-
-## 6. Immediate Action Items Before Next Session
-
-In priority order:
-
-| # | Action | Effort | Owner |
-|---|---|---|---|
-| 1 | Update `VALID_DIRECTORATES` in test file to include `CSE`, `O/D`, `IRM`, etc. | 10 min | Dev |
-| 2 | Add retry logic to `nsf_api_fetcher.fetch_page()` (exponential backoff on 5xx) | 1 hr | Dev |
-| 3 | Decide: unified `federal_awards` table vs. separate per-agency tables | 30 min | Dev + VPR |
-| 4 | Add `data_source` column to schema | 30 min | Dev |
-| 5 | Download NIH ExPORTER bulk CSV files for FY2019–FY2025 | 1 hr | Dev |
-| 6 | Write `scripts/nih_etl.py` | 1 day | Dev |
-
----
-
-## 7. File Inventory
-
-```
-Federal Radar/
-├── data/
-│   ├── federal_awards.db          # 1.65 GB SQLite, WAL mode
-│   └── raw/
-│       └── nsf/
-│           ├── 2016.zip – 2026.zip   # Bulk NSF award archives
-├── scripts/
-│   ├── nsf_etl.py                 # ZIP bulk loader
-│   ├── nsf_api_fetcher.py         # Incremental API sync
-│   ├── nsf_verify.py              # ZIP vs API comparison tool
-│   └── nsf_api_test.py            # Ad-hoc API tests
-├── src/
-│   └── db.py                      # Schema, upsert logic (FIXED)
-├── tests/
-│   ├── test_data_governance.py    # 102-test governance suite
-│   └── baselines.json             # Expected counts/totals for regression
-└── docs/
-    └── project_status_and_roadmap.md   # This document
-```
+For detailed technical decisions and the reasoning behind them, see `CONTEXT.md`.
+For deferred features, see `FUTURE_FEATURES.txt`.
