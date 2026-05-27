@@ -60,9 +60,14 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 - [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
 
 ### What's Next (in order)
-1. **REST API** — FastAPI, search by institution / agency / FY / keyword
-2. **Internal dashboard** — table view, filters, export to CSV
-3. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+1. **UI redesign** — Streamlit MVP exists but is too noisy. **Before writing any UI code, have a product-oriented scoping conversation**: define the exact screens, user flows, and what to show/hide. Do not touch the UI without doing this first.
+2. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+
+### Streamlit App Status
+- App lives in `app/` — run with `streamlit run app/Home.py`
+- Two pages: Program Explorer (`Home.py`) and Institution Breakdown (`pages/2_Institution_Breakdown.py`)
+- All queries in `app/queries.py` with 1-hour cache
+- **Known issue:** UI is too dense/noisy — needs product scoping before rework
 
 ### Post-MVP (deferred)
 - **DHS FY2020–2026** — same pipeline, ~20+ min/year, run as overnight job
