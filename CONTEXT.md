@@ -1,9 +1,77 @@
 # Federal Radar — Technical Context & Decision Log
 
-**Last updated:** 2026-05-26
+**Last updated:** 2026-05-27
 **Purpose:** Single source of truth for every significant technical decision made during
 development. Anyone picking up this project — new developer, stakeholder, or future self —
 should be able to read this and understand not just what we built, but why.
+
+---
+
+## 0. Quick Context (Read This First)
+
+> **For Claude or any new session:** Read this section before anything else. It tells you exactly where the project stands and what to do next without reading the full file.
+
+### What This Is
+Federal Radar is a grants intelligence tool for university research offices (VPR/VPRI). It pulls federal award data from multiple agencies into a single SQLite database so research administrators can track funding trends, benchmark institutions, and eventually get forward-looking opportunity alerts.
+
+### Tech Stack
+- **Language:** Python 3.11
+- **Database:** SQLite (`data/federal_awards.db`, WAL mode, ~2GB)
+- **Deployment:** Railway (APScheduler daily refresh)
+- **No API or UI yet** — DB is queried directly
+
+### Current DB State (as of 2026-05-27)
+410,797 records · $503.17B · FY2019–2026 · 12 sources
+
+| Source | Records | Funding | Complete? |
+|--------|---------|---------|-----------|
+| NIH | 156,439 | $223.1B | Yes (deduplicated) |
+| NSF | 83,845 | $50.0B | Yes |
+| ED | 74,901 | $126.9B | Yes (includes formula/relief grants) |
+| USDA | 27,276 | $18.4B | Yes |
+| DOD | 26,408 | $31.7B | Yes |
+| NASA | 17,424 | $10.6B | Yes |
+| DOE | 10,395 | $24.4B | Yes |
+| Commerce | 6,749 | $11.6B | Yes |
+| DOT | 2,912 | $3.4B | Yes |
+| NEH | 2,703 | $0.4B | Yes |
+| EPA | 1,595 | $2.5B | Yes |
+| DHS | 150 | $0.3B | FY2019 only — slow download |
+| HHS (non-NIH) | — | — | Not loaded — slow download |
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `src/db.py` | Schema, upsert logic, indexes, SQLite pragmas |
+| `scripts/usaspending_api_fetcher.py` | USASpending bulk download + load (ED, DOT, NEH, DOD, etc.) |
+| `scripts/nih_api_fetcher.py` | NIH RePORTER API fetcher |
+| `scripts/nih_deduplicate.py` | NIH deduplication (one row per project, sum of annual budgets) |
+| `scripts/nsf_etl.py` | NSF bulk ZIP loader |
+| `scripts/nsf_api_fetcher.py` | NSF incremental daily sync |
+| `scheduler.py` | APScheduler — daily NSF + NIH refresh on Railway |
+| `data/raw/usaspending/` | Raw ZIPs, CSVs, JOSONLs, .done sentinels by year/agency |
+
+### What's Done
+- [x] Data pipeline: NSF, NIH, DOD, USDA, NASA, DOE, Commerce, EPA, ED, DOT, NEH
+- [x] NIH deduplication (453K → 156K rows, funding preserved)
+- [x] Upsert logic: fiscal_year never overwritten, awd_amount takes MAX
+- [x] Crash-safe .done sentinel system for downloads
+- [x] 12 DB indexes covering all common VPR query patterns
+- [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
+
+### What's Next (in order)
+1. **DHS + HHS full load** — overnight job, same pipeline, just slow (~20+ min/year each)
+2. **REST API** — FastAPI, search by institution / agency / FY / keyword
+3. **Internal dashboard** — table view, filters, export to CSV
+4. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+
+### Critical Gotchas
+- **NIH `awd_amount`** = total project value (post-dedup sum of annual budgets) — comparable to NSF/USASpending
+- **ED `awd_amount`** is large ($90B+ in 2020/2021) due to COVID CARES Act relief — not pure research
+- **USASpending**: always use `total_obligated_amount`, never sum `federal_action_obligation` (transactions can be missing)
+- **HHS bulk download** excludes NIH (filtered by `awarding_sub_agency_name`) to avoid double-counting
+- **`fiscal_year`** = federal FY (Oct 1 – Sep 30); Oct 2022 action → FY2023
+- **Load order**: years loaded ascending so earliest transaction sets `fiscal_year` correctly
 
 ---
 
@@ -276,8 +344,8 @@ NSF provides `obligation_date` which we convert using the Oct 1 rule.
 
 | Gap | Reason | Plan |
 |---|---|---|
-| DHS FY2020-2026 | Slow download, deferred | Overnight job post-MVP |
-| NIH deduplication | Complex, not blocking for MVP | Future feature |
+| DHS FY2020–2026 | Slow download (~20+ min/year), deferred | Overnight job post-MVP |
+| HHS (non-NIH) FY2020–2026 | Same slow download issue as DHS | Overnight job post-MVP |
 | Grant opportunities (solicitations) | Different data type entirely | Grants.gov API, Phase 2 |
 | Subaward data | Not in bulk download | Future |
 | Private foundation grants | Not in federal systems | Phase 3 |
@@ -285,7 +353,29 @@ NSF provides `obligation_date` which we convert using the Oct 1 rule.
 
 ---
 
-## 9. File Structure
+## 9. Database Indexes
+
+All indexes are created idempotently via `init_db()` in `src/db.py`.
+SQLite connection pragmas set per-connection: `cache_size=-65536` (64MB), `temp_store=MEMORY`, `mmap_size=268435456` (256MB).
+
+| Index | Columns | Purpose |
+|---|---|---|
+| `idx_awards_source` | `source` | Filter by data source |
+| `idx_awards_fiscal_year` | `fiscal_year` | Filter by year |
+| `idx_awards_source_fy` | `source, fiscal_year` | Agency + year (most common filter) |
+| `idx_awards_source_inst` | `source, inst_name` | "All NIH awards to [institution]" |
+| `idx_awards_inst_name` | `inst_name` | Institution search |
+| `idx_awards_inst_fy` | `inst_name, fiscal_year` | Institution funding trend over time |
+| `idx_awards_inst_state` | `inst_state_code` | Filter by state |
+| `idx_awards_agcy_id` | `agcy_id` | Filter by agency ID |
+| `idx_awards_opportunity_num` | `opportunity_number` | CFDA program queries |
+| `idx_awards_obligation_date` | `obligation_date` | Date range queries |
+| `idx_awards_activity_code` | `activity_code` | NIH activity code filter |
+| `idx_awards_nih_institute` | `nih_institute` | NIH institute filter |
+
+---
+
+## 10. File Structure
 
 ```
 Federal Radar/
@@ -316,23 +406,24 @@ Federal Radar/
 
 ---
 
-## 10. Current Database State (as of 2026-05-26)
+## 10. Current Database State (as of 2026-05-27)
 
 NIH records reflect post-deduplication counts (one row per unique project).
-ED, DOT, HHS, NEH show FY2023 sample only — full historical load pending.
+HHS (non-NIH) downloaded for FY2019 and FY2023 only — full historical load pending (slow download, same issue as DHS).
 
-| Source | Records | Total Funding | FY Range |
-|---|---|---|---|
-| NSF | 83,845 | $49.95B | FY2019–2026 |
-| NIH | 156,439 | $223.13B | FY2019–2026 (deduplicated) |
-| DOD | 26,408 | $31.65B | FY2019–2026 |
-| USDA | 27,276 | $18.38B | FY2019–2026 |
-| NASA | 17,424 | $10.63B | FY2019–2026 |
-| DOE | 10,395 | $24.43B | FY2019–2026 |
-| Commerce | 6,749 | $11.55B | FY2019–2026 |
-| EPA | 1,595 | $2.46B | FY2019–2026 |
-| DHS | 150 | $0.32B | FY2019 only |
-| ED | — | — | FY2023 sample only |
-| DOT | — | — | FY2023 sample only |
-| HHS (non-NIH) | — | — | FY2023 sample only |
-| NEH | — | — | FY2023 sample only |
+| Source | Records | Total Funding | FY Range | Notes |
+|---|---|---|---|---|
+| NIH | 156,439 | $223.13B | FY2019–2026 | Deduplicated — one row per unique project |
+| NSF | 83,845 | $49.95B | FY2019–2026 | |
+| ED | 74,901 | $126.88B | FY2019–2026 | Includes formula/relief grants alongside research |
+| USDA | 27,276 | $18.38B | FY2019–2026 | |
+| DOD | 26,408 | $31.65B | FY2019–2026 | |
+| NASA | 17,424 | $10.63B | FY2019–2026 | |
+| DOE | 10,395 | $24.43B | FY2019–2026 | |
+| Commerce | 6,749 | $11.55B | FY2019–2026 | |
+| DOT | 2,912 | $3.37B | FY2019–2026 | |
+| NEH | 2,703 | $0.42B | FY2019–2026 | |
+| EPA | 1,595 | $2.46B | FY2019–2026 | |
+| DHS | 150 | $0.32B | FY2019 only | Slow download deferred |
+| HHS (non-NIH) | — | — | Not loaded | Downloaded FY2019+FY2023 only; full load pending |
+| **TOTAL** | **410,797** | **$503.17B** | **FY2019–2026** | |

@@ -38,7 +38,7 @@ from src.db import init_db, upsert_nsf_awards_batch, DB_PATH
 
 BULK_DOWNLOAD_URL = "https://api.usaspending.gov/api/v2/bulk_download/awards/"
 STATUS_URL        = "https://api.usaspending.gov/api/v2/bulk_download/status/"
-POLL_INTERVAL     = 20   # seconds between status checks
+POLL_INTERVAL     = 10   # seconds between status checks
 MAX_WAIT          = 3600 # 1 hour max before giving up
 
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw" / "usaspending"

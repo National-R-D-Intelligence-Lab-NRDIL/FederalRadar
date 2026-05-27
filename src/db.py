@@ -87,18 +87,28 @@ INSERT INTO awards (
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA cache_size = -65536;")    # 64MB page cache
+    conn.execute("PRAGMA temp_store = MEMORY;")    # temp tables in RAM
+    conn.execute("PRAGMA mmap_size = 268435456;")  # 256MB memory-mapped I/O
+    return conn
 
 
 CREATE_INDEXES_SQL = [
+    # Single-column indexes
     "CREATE INDEX IF NOT EXISTS idx_awards_source          ON awards(source);",
     "CREATE INDEX IF NOT EXISTS idx_awards_fiscal_year     ON awards(fiscal_year);",
-    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy       ON awards(source, fiscal_year);",
     "CREATE INDEX IF NOT EXISTS idx_awards_obligation_date ON awards(obligation_date);",
     "CREATE INDEX IF NOT EXISTS idx_awards_inst_name       ON awards(inst_name);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_inst_state      ON awards(inst_state_code);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_agcy_id         ON awards(agcy_id);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_opportunity_num ON awards(opportunity_number);",
     "CREATE INDEX IF NOT EXISTS idx_awards_activity_code   ON awards(activity_code);",
     "CREATE INDEX IF NOT EXISTS idx_awards_nih_institute   ON awards(nih_institute);",
-    "CREATE INDEX IF NOT EXISTS idx_awards_inst_state      ON awards(inst_state_code);",
+    # Composite indexes for common VPR query patterns
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy       ON awards(source, fiscal_year);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_inst     ON awards(source, inst_name);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_inst_fy         ON awards(inst_name, fiscal_year);",
 ]
 
 
