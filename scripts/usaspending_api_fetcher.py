@@ -55,6 +55,17 @@ AGENCIES = {
     "epa":      "Environmental Protection Agency",
     "dhs":      "Department of Homeland Security",
     "commerce": "Department of Commerce",
+    "ed":       "Department of Education",
+    "dot":      "Department of Transportation",
+    "hhs":      "Department of Health and Human Services",
+    "neh":      "National Endowment for the Humanities",
+}
+
+# Sub-agencies to exclude during record extraction.
+# HHS contains NIH — we load NIH separately via nih_api_fetcher.py so we
+# strip NIH records here to avoid double-counting.
+EXCLUDE_SUBAGENCIES = {
+    "hhs": {"national institutes of health"},
 }
 
 
@@ -339,6 +350,14 @@ def process_zip_to_jsonl(zip_path: Path, agency_key: str, jsonl_path: Path) -> i
                     recipient = row.get("recipient_name") or ""
                     if not is_university(recipient):
                         continue
+
+                    # Exclude specific sub-agencies (e.g. NIH within HHS to avoid
+                    # double-counting with nih_api_fetcher.py records)
+                    excluded_subs = EXCLUDE_SUBAGENCIES.get(agency_key, set())
+                    if excluded_subs:
+                        sub = (row.get("awarding_sub_agency_name") or "").lower()
+                        if any(ex in sub for ex in excluded_subs):
+                            continue
 
                     gid = row.get("assistance_award_unique_key") or row.get("assistance_transaction_unique_key")
                     if not gid or gid in seen_ids:

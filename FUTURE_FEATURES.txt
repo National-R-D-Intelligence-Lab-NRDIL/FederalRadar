@@ -15,11 +15,11 @@ DATA / SOURCES
     - Skipped for MVP due to USASpending bulk download taking 20+ minutes per year
     - Run as a one-time overnight job when ready
 
-[ ] NIH amount labeling in UI
-    - NIH awd_amount = budget period slice only (one year's funding), NOT total award value
-    - NSF awd_amount = full award total across entire grant lifespan
-    - USASpending awd_amount = cumulative total obligated to date (comparable to NSF)
-    - In UI: label NIH amounts as "Annual Budget" and NSF/USASpending as "Total Award"
-    - Future: NIH multi-year deduplication — group by core_project_num, show one canonical
-      record per project using the first year's record and latest budget period amount
+[x] NIH deduplication — COMPLETED 2026-05-26
+    - NIH records grouped by core_project_num via scripts/nih_deduplicate.py
+    - 453,631 raw rows -> 156,439 unique projects (65.5% reduction)
+    - awd_amount = sum of all annual budget slices = true total award value
+    - fiscal_year = original award year (earliest transaction)
+    - All three sources (NSF, NIH, USASpending) now consistently store total award value
+    - Total NIH funding preserved: $223.135B before and after (validated)
 

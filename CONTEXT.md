@@ -226,19 +226,38 @@ multi-year grants. This is a known limitation; NIH deduplication is a future fea
 
 ---
 
-## 6. NIH Multi-Year Project Structure
+## 6. NIH Deduplication (Completed)
 
 NIH assigns a new `project_num` every year for the same ongoing grant:
 - `1R01CA123456-01` = year 1 (prefix `1` = new award)
 - `5R01CA123456-02` = year 2 (prefix `5` = continuation)
 - `2R01CA123456-06` = renewal (prefix `2` = competing renewal)
 
-Each year is a separate row in our DB. The `core_project_num` field in `raw_json`
-links all years of the same project. Using `project_num` as `awd_id` means no
-overwrite problem, but the same research project appears N times.
+**Problem:** Storing all years as separate rows inflated award counts and made
+NIH `awd_amount` (a per-year budget slice) incomparable with NSF and USASpending
+(which store total award values).
 
-**Future fix:** Deduplicate NIH by `core_project_num`, keeping the earliest year's
-record as canonical with the latest year's amount. See FUTURE_FEATURES.txt.
+**Fix implemented in `scripts/nih_deduplicate.py`:**
+- Groups all NIH rows by `core_project_num` from `raw_json`
+- Canonical record = earliest `fiscal_year` (awd_id tiebreaker favours `1Rxx` new-award prefix)
+- `awd_amount` = SUM of all annual budget slices = true total project value
+- Non-canonical rows deleted
+- Result: 453,631 rows → 156,439 unique projects (65.5% reduction)
+- Total funding preserved: $223.135B before and after (validated)
+
+**Why Python not SQL:** `json_extract()` on 453K rows without a column index requires
+a full table scan with JSON parsing on every row. Doing it in SQL (GROUP BY + JOIN)
+meant two full scans = prohibitively slow. The script instead streams rows once in
+Python, builds the canonical map in memory O(n), then uses two indexed SQL operations
+(executemany UPDATE on primary key + single DELETE via temp table).
+
+**All three sources now consistently store total award value:**
+
+| Source | `awd_amount` after fix |
+|---|---|
+| NSF | Total award, full lifespan (unchanged) |
+| NIH | Sum of all annual budget periods = total project value |
+| USASpending | Cumulative total obligated to date (unchanged) |
 
 ---
 
@@ -299,10 +318,13 @@ Federal Radar/
 
 ## 10. Current Database State (as of 2026-05-26)
 
+NIH records reflect post-deduplication counts (one row per unique project).
+ED, DOT, HHS, NEH show FY2023 sample only — full historical load pending.
+
 | Source | Records | Total Funding | FY Range |
 |---|---|---|---|
 | NSF | 83,845 | $49.95B | FY2019–2026 |
-| NIH | 453,631 | $223.13B | FY2019–2026 |
+| NIH | 156,439 | $223.13B | FY2019–2026 (deduplicated) |
 | DOD | 26,408 | $31.65B | FY2019–2026 |
 | USDA | 27,276 | $18.38B | FY2019–2026 |
 | NASA | 17,424 | $10.63B | FY2019–2026 |
@@ -310,4 +332,7 @@ Federal Radar/
 | Commerce | 6,749 | $11.55B | FY2019–2026 |
 | EPA | 1,595 | $2.46B | FY2019–2026 |
 | DHS | 150 | $0.32B | FY2019 only |
-| **Total** | **627,473** | **$372.50B** | FY2019–2026 |
+| ED | — | — | FY2023 sample only |
+| DOT | — | — | FY2023 sample only |
+| HHS (non-NIH) | — | — | FY2023 sample only |
+| NEH | — | — | FY2023 sample only |
