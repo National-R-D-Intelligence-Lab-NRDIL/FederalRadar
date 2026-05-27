@@ -60,10 +60,19 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 - [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
 
 ### What's Next (in order)
-1. **DHS + HHS full load** — overnight job, same pipeline, just slow (~20+ min/year each)
-2. **REST API** — FastAPI, search by institution / agency / FY / keyword
-3. **Internal dashboard** — table view, filters, export to CSV
-4. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+1. **REST API** — FastAPI, search by institution / agency / FY / keyword
+2. **Internal dashboard** — table view, filters, export to CSV
+3. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+
+### Post-MVP (deferred)
+- **DHS FY2020–2026** — same pipeline, ~20+ min/year, run as overnight job
+- **HHS (non-NIH) FY2020–2026** — same issue as DHS, overnight job
+
+### Geographic Data (for future map feature)
+- **State** (`inst_state_code`) — already mapped, 99%+ populated, index exists. Ready for choropleth today.
+- **City + ZIP + County** — in `raw_json` for all USASpending sources. Needs extraction to new columns.
+- **Lat/Lon** — NIH has exact coords in `raw_json → geo_lat_lon`. USASpending needs ZIP geocoding.
+- See Section 8 for full details.
 
 ### Critical Gotchas
 - **NIH `awd_amount`** = total project value (post-dedup sum of annual budgets) — comparable to NSF/USASpending
@@ -340,7 +349,33 @@ NSF provides `obligation_date` which we convert using the Oct 1 rule.
 
 ---
 
-## 8. What Is NOT in the DB (Known Gaps)
+## 8. Geographic Data Availability
+
+`inst_state_code` (2-letter USPS code) is mapped for every source and is 99%+ populated.
+Richer geo fields are preserved in `raw_json` but not yet extracted to dedicated columns.
+
+### Coverage summary
+
+| Source | `inst_state_code` | City | ZIP | County | Lat/Lon |
+|---|---|---|---|---|---|
+| USASpending (ED, DOT, NEH, DOD, NASA, USDA, DOE, Commerce, EPA, DHS) | 100% | Yes — `recipient_city_name` | Yes — `recipient_zip_code` + `recipient_zip_last_4_code` | Yes — `recipient_county_name` + FIPS | No — ZIP geocoding needed |
+| NIH | 99.3% | No | No | No | **Yes — `geo_lat_lon` `{lat, lon}`** |
+| NSF | 99.9% | Yes — inside `inst` object | No | No | No |
+
+### What's ready for a geographic chart today
+- **State-level choropleth** — `inst_state_code` is already a mapped DB column with an index (`idx_awards_inst_state`). Works immediately, no changes needed.
+
+### What would need extraction for richer maps
+- **City-level map** — extract `recipient_city_name` (USASpending) and `inst.inst_city` (NSF) from `raw_json` into a new `inst_city` column.
+- **Point map (lat/lon)** — NIH provides exact coordinates in `raw_json → geo_lat_lon`. USASpending sources would need ZIP-to-coordinates geocoding (ZIPs are available in `raw_json`).
+- **County map** — extract `recipient_county_name` and `prime_award_transaction_recipient_county_fips_code` from `raw_json` (USASpending sources only).
+
+### Implementation note
+When building the map feature, extract geo fields via a migration script that reads `raw_json` and backfills new columns (`inst_city`, `inst_zip`, `inst_lat`, `inst_lon`). Do not re-download — all data is already in `raw_json`.
+
+---
+
+## 9. What Is NOT in the DB (Known Gaps)
 
 | Gap | Reason | Plan |
 |---|---|---|
@@ -353,7 +388,7 @@ NSF provides `obligation_date` which we convert using the Oct 1 rule.
 
 ---
 
-## 9. Database Indexes
+## 10. Database Indexes
 
 All indexes are created idempotently via `init_db()` in `src/db.py`.
 SQLite connection pragmas set per-connection: `cache_size=-65536` (64MB), `temp_store=MEMORY`, `mmap_size=268435456` (256MB).
@@ -375,7 +410,7 @@ SQLite connection pragmas set per-connection: `cache_size=-65536` (64MB), `temp_
 
 ---
 
-## 10. File Structure
+## 11. File Structure
 
 ```
 Federal Radar/
@@ -406,7 +441,7 @@ Federal Radar/
 
 ---
 
-## 10. Current Database State (as of 2026-05-27)
+## 12. Current Database State (as of 2026-05-27)
 
 NIH records reflect post-deduplication counts (one row per unique project).
 HHS (non-NIH) downloaded for FY2019 and FY2023 only — full historical load pending (slow download, same issue as DHS).

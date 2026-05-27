@@ -166,6 +166,12 @@ def migrate_db():
 
 
 def upsert_nsf_award(record: dict):
+    """Single-record NSF upsert. Prefer upsert_nsf_awards_batch() for bulk loads."""
+    pi_list = record.get("pi") or []
+    pi_entry = next(
+        (p for p in pi_list if p.get("pi_role") == "Principal Investigator"),
+        pi_list[0] if pi_list else None,
+    )
     row = {
         "awd_id":                 record.get("awd_id"),
         "awd_titl_txt":           record.get("awd_titl_txt"),
@@ -179,7 +185,7 @@ def upsert_nsf_award(record: dict):
         "dir_abbr":               record.get("dir_abbr"),
         "div_abbr":               record.get("div_abbr"),
         "pgm_ele_name":           (record.get("pgm_ele") or [{}])[0].get("pgm_ele_name"),
-        "pi_name":                record.get("po_sign_block_name"),
+        "pi_name":                pi_entry.get("pi_full_name") if pi_entry else None,
         "agcy_id":                record.get("agcy_id"),
         "fiscal_year":            record.get("fiscal_year"),
         "raw_json":               json.dumps(record),
