@@ -158,7 +158,7 @@ def get_program_stats(source, division=None, subdiv=None, program=None,
             f"""SELECT COUNT(*) as awards,
                        COALESCE(SUM(awd_amount), 0) as total_funding,
                        COALESCE(AVG(awd_amount), 0) as avg_award,
-                       COUNT(DISTINCT inst_name) as institutions
+                       COUNT(DISTINCT COALESCE(inst_uei, inst_name)) as institutions
                 FROM awards WHERE {where}""",
             params,
         ).fetchone()
@@ -178,12 +178,13 @@ def get_top_institutions(source, division=None, subdiv=None, program=None,
                                   activity_code, cfda)
     with _conn() as conn:
         df = pd.read_sql_query(
-            f"""SELECT inst_name, inst_state_code,
+            f"""SELECT COALESCE(inst_canonical_name, inst_name) as inst_name,
+                       inst_state_code,
                        COUNT(*) as awards,
                        ROUND(SUM(awd_amount) / 1e6, 2) as total_m,
                        ROUND(AVG(awd_amount) / 1e6, 3) as avg_m
                 FROM awards WHERE {where}
-                GROUP BY inst_name
+                GROUP BY COALESCE(inst_canonical_name, inst_name)
                 ORDER BY total_m DESC
                 LIMIT {limit}""",
             conn,
@@ -302,11 +303,12 @@ def get_gap_programs(division, my_institution, min_peer_awards=3,
 
 @st.cache_data(ttl=3600)
 def search_institutions(query: str, limit=20) -> list[str]:
+    """Search by canonical name (deduped across sources)."""
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT DISTINCT inst_name FROM awards
-               WHERE UPPER(inst_name) LIKE ?
-               ORDER BY inst_name LIMIT ?""",
+            """SELECT DISTINCT canonical_name FROM institutions
+               WHERE UPPER(canonical_name) LIKE ?
+               ORDER BY canonical_name LIMIT ?""",
             (f"%{query.upper()}%", limit),
         ).fetchall()
     return [r[0] for r in rows if r[0]]
@@ -321,7 +323,7 @@ def get_institution_summary(inst_name: str) -> dict:
                       COUNT(DISTINCT source) as agencies,
                       MIN(fiscal_year) as first_fy,
                       MAX(fiscal_year) as last_fy
-               FROM awards WHERE UPPER(inst_name) = UPPER(?)""",
+               FROM awards WHERE inst_canonical_name = ?""",
             (inst_name,),
         ).fetchone()
     return {
@@ -339,7 +341,7 @@ def get_institution_by_agency(inst_name: str) -> pd.DataFrame:
                       ROUND(SUM(awd_amount) / 1e6, 2) as [Total ($M)],
                       MIN(fiscal_year) as [First FY],
                       MAX(fiscal_year) as [Last FY]
-               FROM awards WHERE UPPER(inst_name) = UPPER(?)
+               FROM awards WHERE inst_canonical_name = ?
                GROUP BY source ORDER BY [Total ($M)] DESC""",
             conn, params=(inst_name,),
         )
@@ -353,7 +355,7 @@ def get_institution_trend(inst_name: str) -> pd.DataFrame:
             """SELECT fiscal_year, source,
                       ROUND(SUM(awd_amount) / 1e6, 2) as total_m
                FROM awards
-               WHERE UPPER(inst_name) = UPPER(?) AND fiscal_year IS NOT NULL
+               WHERE inst_canonical_name = ? AND fiscal_year IS NOT NULL
                GROUP BY fiscal_year, source
                ORDER BY fiscal_year""",
             conn, params=(inst_name,),
@@ -376,7 +378,7 @@ def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFra
                        ROUND(SUM(awd_amount) / 1e6, 2) as [Total ($M)],
                        GROUP_CONCAT(DISTINCT dir_abbr) as Divisions
                 FROM awards
-                WHERE UPPER(inst_name) = UPPER(?) {source_clause}
+                WHERE inst_canonical_name = ? {source_clause}
                 AND pi_name IS NOT NULL AND pi_name != ''
                 GROUP BY pi_name, source
                 ORDER BY [Total ($M)] DESC""",
@@ -388,7 +390,7 @@ def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFra
 @st.cache_data(ttl=3600)
 def get_institution_awards(inst_name: str, source: str | None = None,
                            fy: int | None = None) -> pd.DataFrame:
-    clauses = ["UPPER(inst_name) = UPPER(?)"]
+    clauses = ["inst_canonical_name = ?"]
     params = [inst_name]
     if source:
         clauses.append("source = ?")
