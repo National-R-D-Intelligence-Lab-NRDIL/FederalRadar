@@ -218,7 +218,7 @@ if peer_cols:
 
         st.markdown(
             f"**Biggest gap: {top_prog_label}** — "
-            f"UNT has **{unt_awards_top} awards**, "
+            f"In this program, UNT has **{unt_awards_top} awards**, "
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
             f"Closing this gap = **${gap_m_top:.1f}M** in funding."
@@ -262,19 +262,22 @@ for prog in pivot_n.index:
 display = (
     pd.DataFrame(rows)
     .set_index("Program")
-    .query("`Opportunity ($M)` > 0")
     .sort_values("Opportunity ($M)", ascending=False)
 )
 
-st.subheader("Competitive Gap Analysis")
+n_gaps       = int((display["Opportunity ($M)"] > 0).sum())
+n_competitive = int((display["Opportunity ($M)"] <= 0).sum())
+
+st.subheader("Program Breakdown")
 st.caption(
-    "Programs where peers are outperforming UNT, ranked by opportunity size. "
-    "**Opportunity ($M)** = additional funding UNT would receive if it matched the peer average. "
-    "Color = UNT awards vs peer average: red = trailing badly | orange = within reach | green = competitive."
+    f"All programs sorted by opportunity size. "
+    f"**Opportunity ($M)** = how much more UNT would receive if it matched the peer average "
+    f"(negative = UNT is already at or above peer average). "
+    f"UNT column: 🔴 trailing badly · 🟠 within reach · 🟢 competitive or leading."
 )
 
 if display.empty:
-    st.success("No gaps found — UNT is competitive across all programs in this view.")
+    st.info("No program data found for this filter combination.")
     st.stop()
 
 
@@ -283,9 +286,13 @@ def _color_unt(col):
     if col.name != "UNT":
         return [""] * len(col)
     peer_avg = display["Peer Avg"]
+    opp      = display["Opportunity ($M)"]
     styles = []
-    for unt_val, avg_val in zip(col, peer_avg):
-        if avg_val == 0:
+    for unt_val, avg_val, opp_val in zip(col, peer_avg, opp):
+        if opp_val <= 0:
+            # UNT at or above peer average
+            styles.append("background-color: #27ae60; color: white")
+        elif avg_val == 0:
             styles.append("")
         elif unt_val == 0:
             styles.append("background-color: #c0392b; color: white")
