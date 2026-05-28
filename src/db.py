@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS awards (
     -- NIH-specific (NULL for NSF records)
     activity_code           TEXT,
     nih_institute           TEXT,
-    direct_cost_amt         REAL
+    direct_cost_amt         REAL,
+    -- Institution identity (populated via UEI enrichment pipeline)
+    inst_uei                TEXT,   -- SAM.gov Unique Entity Identifier
+    inst_canonical_name     TEXT    -- Normalized display name tied to UEI
 );
 """
 
@@ -109,6 +112,9 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy       ON awards(source, fiscal_year);",
     "CREATE INDEX IF NOT EXISTS idx_awards_source_inst     ON awards(source, inst_name);",
     "CREATE INDEX IF NOT EXISTS idx_awards_inst_fy         ON awards(inst_name, fiscal_year);",
+    # UEI-based institution identity indexes
+    "CREATE INDEX IF NOT EXISTS idx_awards_inst_uei        ON awards(inst_uei);",
+    "CREATE INDEX IF NOT EXISTS idx_awards_canonical_name  ON awards(inst_canonical_name);",
 ]
 
 
