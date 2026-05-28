@@ -1,9 +1,11 @@
 # Federal Radar
 
-A data pipeline and governance system for federal research award data.
-Currently covers **83,845 NSF awards totaling ~$49.95B** (FY2019–FY2026),
-with a validated, auditable SQLite database ready for VPR stakeholder use
-and structured for expansion to NIH, DOD, and NASA.
+A grants intelligence tool for university research offices (VPR/AVP-Research).
+Pulls federal award data from 12 agencies into a single SQLite database and surfaces
+competitive gap analysis — showing where peers are winning and by how much.
+
+**Current state:** 410,797 awards · $503.17B · FY2019–2026 · NSF, NIH, DOD, DOE,
+NASA, USDA, ED, DOT, NEH, Commerce, EPA, DHS
 
 ---
 
@@ -11,142 +13,153 @@ and structured for expansion to NIH, DOD, and NASA.
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Database Schema](#database-schema)
-4. [Data Sources](#data-sources)
-5. [Setup](#setup)
-6. [Running the ETL (ZIP Bulk Load)](#running-the-etl-zip-bulk-load)
-7. [Running the API Sync (Incremental)](#running-the-api-sync-incremental)
-8. [Validating the Data](#validating-the-data)
-9. [Running the Test Suite](#running-the-test-suite)
-10. [Smoke Tests (Pre-Demo Checklist)](#smoke-tests-pre-demo-checklist)
-11. [Known Data Characteristics](#known-data-characteristics)
-12. [Multi-Agency Roadmap](#multi-agency-roadmap)
-13. [Project Structure](#project-structure)
+3. [Running the Streamlit App](#running-the-streamlit-app)
+4. [Database Schema](#database-schema)
+5. [Data Sources](#data-sources)
+6. [Setup](#setup)
+7. [Loading Data](#loading-data)
+8. [UEI Enrichment Pipeline](#uei-enrichment-pipeline)
+9. [Validating the Data](#validating-the-data)
+10. [Project Structure](#project-structure)
+11. [Quick Reference](#quick-reference)
 
 ---
 
 ## Overview
 
-Federal Radar ingests NSF federal award data from two sources:
+Federal Radar answers one primary question for VPR/AVP-Research offices:
 
-- **Bulk ZIP archives** — annual JSON archives from NSF covering all awards
-  per year, loaded once to establish the historical baseline.
-- **Live NSF API** — incremental sync for recent/amended awards, run on a
-  schedule to keep the database current.
+> **In [agency/program], where are peers beating us, and by how much?**
 
-Both sources are mapped to a unified schema, upserted idempotently, and
-validated against a 102-test governance suite that enforces federal data
-stewardship standards: accuracy, completeness, consistency, and auditability.
+The Streamlit dashboard shows:
+- A 4-metric scorecard (UNT awards, funding, rank among peers, programs with gaps)
+- A program breakdown table sorted by funding gap (all programs, peers side by side)
+- A bar chart comparing all peer institutions by total funding
+
+Peers are pre-configured in the database — two sets available:
+- **Texas peers:** Texas A&M, UT Austin, UT Arlington, UT Dallas, UTSA, UTEP, UTRGV, Texas State, Texas Tech, University of Houston
+- **National peers:** Arizona State, Purdue, Georgia State, University of South Florida, UCF, University of Utah, University of Memphis, University of Illinois Chicago, Tulane, UC Riverside
 
 ---
 
 ## Architecture
 
 ```
-NSF ZIP Archives              NSF Public API
-(data/raw/nsf/*.zip)          (api.nsf.gov)
-        │                           │
-        ▼                           ▼
-  nsf_etl.py                nsf_api_fetcher.py
-  map_record()               map_record()
-  fiscal year derivation     date conversion
-  PI extraction              pagination
-        │                           │
-        └──────────┬────────────────┘
-                   ▼
-             src/db.py
-         upsert_nsf_awards_batch()
-         INSERT ... ON CONFLICT DO UPDATE
-         (created_at preserved; updated_at advanced)
-                   │
-                   ▼
-        data/federal_awards.db
-        SQLite, WAL mode, 1.65 GB
-                   │
-          ┌────────┴────────┐
-          ▼                 ▼
-    nsf_verify.py     tests/
-    (ZIP vs API       test_data_governance.py
-     comparison)      (102 governance tests)
+Data Sources
+    │
+    ├── NSF API (nsf_api_fetcher.py)          → daily incremental
+    ├── NSF Bulk ZIP (nsf_etl.py)             → historical backfill
+    ├── NIH RePORTER API (nih_api_fetcher.py) → fiscal year download
+    └── USASpending Bulk Download             → fiscal year download
+            (usaspending_api_fetcher.py)        per agency, parallel
+    │
+    ▼
+SQLite DB (federal_awards.db)
+    │
+    ├── awards table (unified, all sources, 410K rows)
+    └── institutions table (UEI reference, 19,433 rows, peer flags)
+    │
+    ▼
+Streamlit App (app/Home.py)
+    └── queries.py (cached queries, peer constants, NSF name lookups)
 ```
 
-### Fiscal Year Rule
+**Deployment:** Railway. APScheduler runs daily NSF + NIH refresh.
 
-NSF and all federal agencies follow the US government fiscal year:
-**October 1 through September 30.**
+---
 
-An award with `obligation_date` in October, November, or December of year N
-belongs to **fiscal year N+1**. An award dated January–September of year N
-belongs to **fiscal year N**.
+## Running the Streamlit App
 
-```python
-# Implemented in both nsf_etl.py and nsf_api_fetcher.py
-fiscal_year = year + 1 if month >= 10 else year
+```bash
+cd app
+streamlit run Home.py
 ```
 
-### Upsert Strategy
+The app opens at `http://localhost:8501`.
 
-Records are inserted or updated using `ON CONFLICT DO UPDATE`, which:
-- Sets `created_at` once at insert time — never changed again
-- Advances `updated_at` on every update
-- Replaces all other fields with the latest source data
-- Is idempotent — running the same ETL twice produces the same result
+**Sidebar controls:**
+- **Agency** — NSF, NIH, DOD, DOE, NASA, USDA, ED, Commerce
+- **Directorate / Division** (NSF) or **Institute** (NIH) — optional drill-down
+- **Peer Set** — Texas, National, or Both
+- **Fiscal Years** — slider, defaults to last 3 years
+
+**What you see:**
+1. Scorecard row: UNT Awards · UNT Funding · Rank Among Peers · Programs with Gaps
+2. Headline: one-sentence summary of the biggest gap program
+3. Program Breakdown table: all programs sorted by Opportunity ($M), peers side by side
+4. Bar chart: total funding comparison across all institutions
+
+**Reading the table:**
+- **Opportunity ($M)** = how much more funding UNT would receive if it matched the peer average. Negative = UNT is already at or above peer average.
+- **UNT column color:** green = competitive/leading, orange = within reach (<75% of peer avg), red = significantly behind (<40%), dark red = zero awards
+- **Field Total** = count of awards in this program across ALL US institutions (not just peers) — context for whether it's a large or niche program
+- **Last Funded** = most recent fiscal year with an award in this program — distinguishes active from dormant programs
 
 ---
 
 ## Database Schema
 
-**Table:** `nsf_awards`
+### `awards` table (unified, all sources)
 
-| Column | Type | Nullable | Description |
-|---|---|---|---|
-| `awd_id` | TEXT | NOT NULL | NSF award ID (primary key, typically 7-digit numeric) |
-| `awd_titl_txt` | TEXT | NOT NULL | Award title |
-| `inst_name` | TEXT | | Awardee institution name |
-| `inst_state_code` | TEXT | | Institution US state/territory code |
-| `awd_amount` | REAL | | Obligated funding amount in USD |
-| `obligation_date` | TEXT | | Date of obligation (YYYY-MM-DD) |
-| `project_start_date` | TEXT | | Project start date (YYYY-MM-DD) |
-| `project_end_date` | TEXT | | Project expiration date (YYYY-MM-DD) |
-| `awd_abstract_narration` | TEXT | | Award abstract |
-| `dir_abbr` | TEXT | | NSF directorate abbreviation (e.g., ENG, MPS, BIO) |
-| `div_abbr` | TEXT | | NSF division abbreviation |
-| `pgm_ele_name` | TEXT | | Program element name |
-| `pi_name` | TEXT | | Principal investigator full name |
-| `agcy_id` | TEXT | | Agency identifier (`NSF` for all current records) |
-| `fiscal_year` | INTEGER | | Derived US federal fiscal year |
-| `raw_json` | TEXT | NOT NULL | Original source JSON (audit trail) |
-| `created_at` | DATETIME | NOT NULL | Timestamp of first insert — never updated |
-| `updated_at` | DATETIME | NOT NULL | Timestamp of most recent upsert |
+| Column | Type | Description |
+|---|---|---|
+| `awd_id` | TEXT PK | Base award ID (stable across all transactions) |
+| `source` | TEXT | Data source: `nsf`, `nih`, `ed`, `dod`, etc. |
+| `awd_titl_txt` | TEXT | Award title |
+| `inst_name` | TEXT | Raw institution name from source |
+| `inst_uei` | TEXT | SAM.gov Unique Entity Identifier (dedup key) |
+| `inst_canonical_name` | TEXT | Normalized institution name (from institutions table) |
+| `inst_state_code` | TEXT | 2-letter state code |
+| `awd_amount` | REAL | Total award value in USD (see note below) |
+| `fiscal_year` | INTEGER | Federal fiscal year (Oct 1 – Sep 30) |
+| `dir_abbr` | TEXT | NSF directorate / NIH institute abbreviation |
+| `div_abbr` | TEXT | NSF division abbreviation |
+| `pgm_ele_name` | TEXT | Program element name |
+| `pi_name` | TEXT | Principal investigator |
+| `raw_json` | TEXT | Original source JSON (audit trail) |
+| `created_at` | DATETIME | First insert timestamp — never updated |
+| `updated_at` | DATETIME | Most recent upsert timestamp |
 
-**Pragmas:**
-- `PRAGMA journal_mode = WAL` — enables concurrent reads during writes
-- `PRAGMA synchronous = NORMAL` — balances durability and write speed
-- `awd_id` is the primary key and conflict target for upserts
+**`awd_amount` by source:**
+- NSF: total award for full grant lifespan
+- NIH: sum of all annual budget periods = true total project value (post-dedup)
+- USASpending: cumulative total obligated to date
+
+### `institutions` table (reference, UEI-keyed)
+
+| Column | Type | Description |
+|---|---|---|
+| `inst_uei` | TEXT PK | SAM.gov UEI |
+| `canonical_name` | TEXT | Normalized display name |
+| `inst_state_code` | TEXT | State |
+| `is_my_institution` | INTEGER | 1 = University of North Texas |
+| `is_peer_texas` | INTEGER | 1 = Texas peer institution |
+| `is_peer_national` | INTEGER | 1 = National peer institution |
+| `peer_label` | TEXT | Short display name for peers |
 
 ---
 
 ## Data Sources
 
-### NSF Bulk ZIP Archives
+| Source | Records | Funding | Pipeline |
+|---|---|---|---|
+| NIH | 156,439 | $223.1B | `nih_api_fetcher.py` → `nih_deduplicate.py` |
+| NSF | 83,845 | $50.0B | `nsf_etl.py` (bulk) + `nsf_api_fetcher.py` (daily) |
+| ED | 74,901 | $126.9B | `usaspending_api_fetcher.py` |
+| USDA | 27,276 | $18.4B | `usaspending_api_fetcher.py` |
+| DOD | 26,408 | $31.7B | `usaspending_api_fetcher.py` |
+| NASA | 17,424 | $10.6B | `usaspending_api_fetcher.py` |
+| DOE | 10,395 | $24.4B | `usaspending_api_fetcher.py` |
+| Commerce | 6,749 | $11.6B | `usaspending_api_fetcher.py` |
+| DOT | 2,912 | $3.4B | `usaspending_api_fetcher.py` |
+| NEH | 2,703 | $0.4B | `usaspending_api_fetcher.py` |
+| EPA | 1,595 | $2.5B | `usaspending_api_fetcher.py` |
+| DHS | 150 | $0.3B | FY2019 only (slow download) |
 
-**Location:** `data/raw/nsf/`
-**Files:** `2016.zip` through `2026.zip`
-**Format:** ZIP archives containing one JSON file per award
-**Coverage:** All NSF awards with obligation dates in the archive year (note:
-  obligation dates in the 2016–2018 archives map to FY2019+)
-**URL:** `https://www.nsf.gov/awardsearch/download.jsp`
-
-Each JSON file contains one award record with fields including institution,
-PI list, program elements, funding amounts, and dates.
-
-### NSF Public API
-
-**Base URL:** `https://api.nsf.gov/services/v1/awards.json`
-**Authentication:** None (public API)
-**Rate limit:** No documented limit; be respectful (no parallel requests)
-**Page size:** 25 records per request
-**Use case:** Incremental sync for recent awards and amendments
+**Notes:**
+- ED includes COVID CARES Act formula/relief grants — `awd_amount` is large ($90B+ in 2020/2021) and not directly comparable to research grants
+- Federal fiscal year = October 1 – September 30 (Oct 2022 action = FY2023)
+- HHS (non-NIH) not loaded — same slow download issue as DHS
 
 ---
 
@@ -154,27 +167,9 @@ PI list, program elements, funding amounts, and dates.
 
 ### Prerequisites
 
-- Python 3.10 or later
-- `pytest` for the test suite (`pip install pytest`)
-- No other external dependencies — the pipeline uses only the Python standard library
-
-### Directory structure
-
-Ensure the raw data directory exists before running the ETL:
-
-```bash
-mkdir -p data/raw/nsf
-```
-
-Place the NSF ZIP files in `data/raw/nsf/`:
-
-```
-data/raw/nsf/
-├── 2016.zip
-├── 2017.zip
-...
-└── 2026.zip
-```
+- Python 3.11
+- Dependencies: `pip install streamlit pandas plotly`
+- For data pipeline: no additional dependencies (standard library only for core ETL)
 
 ### Initialize the database
 
@@ -182,277 +177,118 @@ data/raw/nsf/
 python src/db.py
 ```
 
-This creates `data/federal_awards.db` with the correct schema and WAL mode.
-Safe to run multiple times — uses `CREATE TABLE IF NOT EXISTS`.
+Creates `data/federal_awards.db` with schema, WAL mode, and all indexes. Safe to re-run.
+
+### Directory structure
+
+```
+data/raw/
+├── nsf/
+│   ├── 2016.zip through 2026.zip
+└── usaspending/
+    ├── 2019/
+    │   ├── ED_FY2019.zip
+    │   ├── ED_FY2019.csv
+    │   ├── ED_FY2019.jsonl
+    │   └── ED_FY2019.done        ← sentinel: only present when fully processed
+    └── ...
+```
 
 ---
 
-## Running the ETL (ZIP Bulk Load)
+## Loading Data
 
-### Load all ZIPs
+### NSF (bulk ZIPs)
 
 ```bash
 python scripts/nsf_etl.py
 ```
 
-Processes all ZIP files in `data/raw/nsf/` in alphabetical order.
-Prints progress every 1,000 records and a final summary table.
-The first full load of all 11 ZIPs takes approximately 10–20 minutes.
+Processes all ZIPs in `data/raw/nsf/`. First full load takes 10–20 minutes. Idempotent.
 
-### Load a single year
+### NSF (incremental daily sync)
 
 ```bash
-python scripts/nsf_etl.py --year 2025
+python scripts/nsf_api_fetcher.py           # last 1 day
+python scripts/nsf_api_fetcher.py --days 30  # last 30 days
 ```
 
-Only processes ZIPs whose filename contains `2025`. Useful for reloading a
-single year after an amended archive is released by NSF.
+### NIH
 
-### Re-running is safe
+```bash
+python scripts/nih_api_fetcher.py    # download by fiscal year
+python scripts/nih_deduplicate.py    # deduplicate (one row per project)
+```
 
-The ETL is fully idempotent. Running it again on the same ZIP:
-- Updates records where fields have changed
-- Leaves records unchanged where nothing has changed
-- Never creates duplicates
-- Preserves `created_at` for existing records
+### USASpending (ED, DOD, DOE, NASA, USDA, Commerce, DOT, NEH, EPA)
+
+```bash
+python scripts/usaspending_api_fetcher.py
+```
+
+Downloads all agencies in parallel for each fiscal year. Saves `.zip`, `.csv`, `.jsonl`,
+and `.done` sentinel. Skips years with existing `.done` files. Loads into DB automatically.
 
 ---
 
-## Running the API Sync (Incremental)
+## UEI Enrichment Pipeline
 
-### Pull the last 1 day (default)
-
-```bash
-python scripts/nsf_api_fetcher.py
-```
-
-Fetches awards with `obligation_date` from yesterday to today and upserts them.
-
-### Pull a longer window
+UEI (Unique Entity Identifier) is the SAM.gov-assigned 12-character ID used as a
+cross-source deduplication key. Run these phases in order after loading all data.
 
 ```bash
-python scripts/nsf_api_fetcher.py --days 30
+python scripts/phase1_usaspending_uei.py     # extract UEIs from USASpending raw_json
+python scripts/phase2_build_institutions_table.py  # build institutions reference table
+python scripts/phase3a_nsf_uei_extract.py    # extract UEIs from NSF raw_json
+python scripts/phase3b_nih_uei_enrich.py     # NIH UEI enrichment
+python scripts/phase4_canonical_names.py     # rebuild institutions + canonical names
 ```
 
-### Compare API vs database (no upsert)
+After Phase 4, all awards have `inst_canonical_name` populated. The Streamlit app
+uses this column for all institution queries.
 
-Fetch two specific awards and compare every field between the live API and the
-current DB record:
-
-```bash
-python scripts/nsf_api_fetcher.py --test
-```
-
-### Spot-check recent awards
-
-Check whether awards from the last N days are already in the database:
-
-```bash
-python scripts/nsf_api_fetcher.py --exists --days 7
-```
-
-### Cross-source comparison
-
-Compare 5 sampled awards between the ZIP-loaded DB values and the live API:
-
-```bash
-python scripts/nsf_api_fetcher.py --compare
-```
+**To add or change peer institutions:** Edit `PEER_FLAGS` in
+`scripts/phase4_canonical_names.py` and re-run Phase 4. It rebuilds from scratch safely.
 
 ---
 
 ## Validating the Data
 
-### ZIP vs API field-by-field comparison
+### Quick DB health check
 
 ```bash
-python scripts/nsf_verify.py
-```
-
-Compares a set of sampled award IDs between the ZIP-loaded database values
-and the live NSF API, printing a field-by-field match table.
-
----
-
-## Running the Test Suite
-
-The test suite enforces 9 data governance pillars and is the primary quality
-gate before any stakeholder handoff or agency reload.
-
-### Offline tests (no network, fast — ~20 seconds)
-
-```bash
-pytest tests/test_data_governance.py -v
-```
-
-### Full tests including live NSF API checks (~8 minutes)
-
-```bash
-FEDERAL_RADAR_NETWORK_TESTS=1 pytest tests/test_data_governance.py -v
-```
-
-### Run only a specific pillar
-
-```bash
-# Schema integrity only
-pytest tests/test_data_governance.py -v -k "S0"
-
-# Fiscal year edge cases only
-pytest tests/test_data_governance.py -v -k "FY"
-
-# Performance only
-pytest tests/test_data_governance.py -v -k "P0"
-```
-
-### Expected results (clean database)
-
-| Result | Offline | With Network |
-|---|---|---|
-| PASSED | 87 | 95 |
-| XFAILED (documented flags) | 5 | 6 |
-| SKIPPED | 10 | 0 |
-| FAILED | 0 | 0 |
-
-`XFAILED` tests are **not failures.** They are documented data characteristics
-(see [Known Data Characteristics](#known-data-characteristics)).
-
-### Updating baselines after a reload
-
-If you intentionally reload the database (e.g., after NSF releases amended ZIPs),
-update `tests/baselines.json` to match the new counts:
-
-```bash
-python -c "
-import sqlite3, json
-conn = sqlite3.connect('data/federal_awards.db')
-count = conn.execute('SELECT COUNT(*) FROM nsf_awards').fetchone()[0]
-total = conn.execute('SELECT SUM(awd_amount) FROM nsf_awards').fetchone()[0]
-print(json.dumps({'expected_record_count': count, 'expected_funding_billions': round(total/1e9, 4)}, indent=2))
-conn.close()
-"
-```
-
-Paste the output into `tests/baselines.json`.
-
----
-
-## Smoke Tests (Pre-Demo Checklist)
-
-Run these before any VPR stakeholder demo or agency data handoff.
-Should complete in under 2 minutes.
-
-```bash
-# 1. Database accessible and healthy
 sqlite3 data/federal_awards.db "PRAGMA integrity_check;"
 # Expected: ok
 
-sqlite3 data/federal_awards.db "PRAGMA journal_mode;"
-# Expected: wal
+sqlite3 data/federal_awards.db "SELECT COUNT(*), ROUND(SUM(awd_amount)/1e9,2) FROM awards;"
+# Expected: ~410797|503.17
 
-# 2. Row count and funding baseline
-sqlite3 data/federal_awards.db "SELECT COUNT(*), ROUND(SUM(awd_amount)/1e9, 2) FROM nsf_awards;"
-# Expected: 83845|49.95 (approximately)
-
-# 3. No duplicate award IDs
-sqlite3 data/federal_awards.db "SELECT COUNT(*) FROM (SELECT awd_id FROM nsf_awards GROUP BY awd_id HAVING COUNT(*) > 1);"
-# Expected: 0
-
-# 4. No NULL titles
-sqlite3 data/federal_awards.db "SELECT COUNT(*) FROM nsf_awards WHERE awd_titl_txt IS NULL;"
-# Expected: 0
-
-# 5. No NULL raw_json (audit trail intact)
-sqlite3 data/federal_awards.db "SELECT COUNT(*) FROM nsf_awards WHERE raw_json IS NULL;"
-# Expected: 0
-
-# 6. Fiscal year distribution
-sqlite3 data/federal_awards.db "SELECT fiscal_year, COUNT(*), ROUND(SUM(awd_amount)/1e6, 1) FROM nsf_awards GROUP BY fiscal_year ORDER BY fiscal_year;"
-
-# 7. FY boundary correctness spot-check (Oct 1 awards → next FY)
-sqlite3 data/federal_awards.db "SELECT awd_id, obligation_date, fiscal_year FROM nsf_awards WHERE obligation_date LIKE '%-10-01' LIMIT 5;"
-
-# 8. API connectivity test
-python scripts/nsf_api_fetcher.py --test
+sqlite3 data/federal_awards.db "SELECT COUNT(*) FROM institutions WHERE is_my_institution=1 OR is_peer_texas=1 OR is_peer_national=1;"
+# Expected: 27+ (UNT has 2 UEIs)
 ```
 
----
+### Verify peer configuration
 
-## Known Data Characteristics
-
-These are documented properties of the data — not errors.
-
-### FY2016–2018 Gap
-ZIP files for 2016–2018 were loaded but produced **zero FY2016–2018 records**.
-The awards in those archives have `obligation_date` values that fall in FY2019
-and later. This reflects NSF's internal data — those archives contain awards
-obligated in later years, not 2016–2018. The earliest records in the database
-are FY2019.
-
-### 10 Non-Standard Award IDs
-Ten records have contract-style IDs (e.g., `49100421C0035`) rather than the
-standard 7-digit numeric format. These are SBIR/contract awards and are valid
-federal records.
-
-### NULL Rate Summary
-
-All fields are within federal data quality thresholds:
-
-| Field | NULL Rate |
-|---|---|
-| `awd_amount` | 0.01% |
-| `obligation_date` | 0.01% |
-| `fiscal_year` | 0.01% |
-| `inst_name` | 0.00% |
-| `pi_name` | 0.00% |
-| `dir_abbr` | 0.00% |
-| `raw_json` | 0.00% |
-
-### NSF Directorate Codes in This Dataset
-
-| Code | Directorate |
-|---|---|
-| MPS | Mathematical and Physical Sciences |
-| CSE | Computer and Information Science and Engineering |
-| ENG | Engineering |
-| GEO | Geosciences |
-| EDU | STEM Education |
-| BIO | Biological Sciences |
-| TIP | Technology, Innovation and Partnerships |
-| SBE | Social, Behavioral and Economic Sciences |
-| O/D | Office of the Director |
-| IRM / BFA / NSB / OCIO | Administrative/oversight offices |
-
-### `agcy_id` Values
-All ZIP-loaded records have `agcy_id = 'NSF'`. Records loaded via the API have
-`agcy_id = NULL` (the API does not return an agency ID field). This is expected.
-
----
-
-## Multi-Agency Roadmap
-
-The schema and test suite are designed for multi-agency expansion. The full
-roadmap is documented in `docs/project_status_and_roadmap.md`.
-
-### Planned agencies in priority order
-
-| Agency | Data Source | Complexity | Status |
-|---|---|---|---|
-| NIH | NIH ExPORTER + Reporter API | Low | Not started |
-| NASA | USASpending bulk + API | Medium | Not started |
-| DOD | USASpending bulk + API | High | Not started |
-
-### Required schema changes before first new agency
-
-```sql
--- 1. Add data source tracking
-ALTER TABLE nsf_awards ADD COLUMN data_source TEXT;
-
--- 2. Rename for multi-agency use (optional but recommended)
-ALTER TABLE nsf_awards RENAME TO federal_awards;
+```bash
+sqlite3 data/federal_awards.db "
+  SELECT peer_label, inst_uei, is_my_institution, is_peer_texas, is_peer_national
+  FROM institutions
+  WHERE is_my_institution=1 OR is_peer_texas=1 OR is_peer_national=1
+  ORDER BY is_my_institution DESC, is_peer_texas DESC, peer_label;
+"
 ```
 
-See `docs/project_status_and_roadmap.md` for field mapping tables, estimated
-volumes, and step-by-step implementation notes for each agency.
+### Verify inst_canonical_name coverage
+
+```bash
+sqlite3 data/federal_awards.db "
+  SELECT COUNT(*) as total,
+         COUNT(inst_canonical_name) as with_canonical,
+         ROUND(COUNT(inst_canonical_name)*100.0/COUNT(*),1) as pct
+  FROM awards;
+"
+# Expected: ~99.7%+ coverage
+```
 
 ---
 
@@ -460,34 +296,34 @@ volumes, and step-by-step implementation notes for each agency.
 
 ```
 Federal Radar/
-│
-├── README.md                          # This file
-│
+├── app/
+│   ├── Home.py                        Streamlit app — competitive gap analysis
+│   └── queries.py                     DB queries, peer config, NSF name constants
 ├── data/
-│   ├── federal_awards.db              # SQLite database (WAL mode, ~1.65 GB)
+│   ├── federal_awards.db              SQLite, WAL mode, ~2GB
 │   └── raw/
-│       └── nsf/
-│           ├── 2016.zip               # NSF bulk award archives
-│           ├── 2017.zip
-│           ├── ...
-│           └── 2026.zip
-│
+│       ├── nsf/                       NSF bulk ZIPs (2016–2026)
+│       └── usaspending/               Per-year, per-agency raw downloads
 ├── scripts/
-│   ├── nsf_etl.py                     # ZIP bulk loader — processes all annual ZIPs
-│   ├── nsf_api_fetcher.py             # Incremental API sync and comparison tools
-│   ├── nsf_verify.py                  # ZIP vs API field-by-field validation
-│   └── nsf_api_test.py                # Ad-hoc API exploration
-│
+│   ├── nsf_etl.py                     NSF bulk ZIP loader
+│   ├── nsf_api_fetcher.py             NSF incremental API sync
+│   ├── nih_api_fetcher.py             NIH RePORTER API fetcher
+│   ├── nih_deduplicate.py             NIH deduplication (one row per project)
+│   ├── usaspending_api_fetcher.py     USASpending bulk download + load
+│   ├── phase1_usaspending_uei.py      UEI extraction from USASpending raw_json
+│   ├── phase2_build_institutions_table.py  Institutions reference table
+│   ├── phase3a_nsf_uei_extract.py     UEI extraction from NSF raw_json
+│   ├── phase3b_nih_uei_enrich.py      NIH UEI enrichment
+│   └── phase4_canonical_names.py      Rebuild institutions + canonical names
 ├── src/
-│   └── db.py                          # Schema definition, upsert logic
-│
+│   └── db.py                          Schema, upsert logic, indexes
 ├── tests/
-│   ├── __init__.py
-│   ├── test_data_governance.py        # 102-test governance suite (9 pillars)
-│   └── baselines.json                 # Expected record count and funding totals
-│
-└── docs/
-    └── project_status_and_roadmap.md  # Handoff document and multi-agency plan
+│   ├── test_data_governance.py        Governance test suite
+│   └── baselines.json                 Expected counts/totals
+├── scheduler.py                       APScheduler daily refresh (NSF + NIH)
+├── railway.toml                       Railway deployment config
+├── CONTEXT.md                         Full technical decision log
+└── README.md                          This file
 ```
 
 ---
@@ -496,14 +332,13 @@ Federal Radar/
 
 | Task | Command |
 |---|---|
+| **Run the app** | `cd app && streamlit run Home.py` |
 | Initialize DB | `python src/db.py` |
-| Load all ZIPs | `python scripts/nsf_etl.py` |
-| Load one year | `python scripts/nsf_etl.py --year 2025` |
-| API sync (1 day) | `python scripts/nsf_api_fetcher.py` |
-| API sync (30 days) | `python scripts/nsf_api_fetcher.py --days 30` |
-| Compare API vs DB | `python scripts/nsf_api_fetcher.py --test` |
-| Check recent awards | `python scripts/nsf_api_fetcher.py --exists --days 7` |
-| Run tests (offline) | `pytest tests/test_data_governance.py -v` |
-| Run tests (full) | `FEDERAL_RADAR_NETWORK_TESTS=1 pytest tests/test_data_governance.py -v` |
+| Load NSF ZIPs | `python scripts/nsf_etl.py` |
+| NSF daily sync | `python scripts/nsf_api_fetcher.py` |
+| Load NIH | `python scripts/nih_api_fetcher.py` |
+| Deduplicate NIH | `python scripts/nih_deduplicate.py` |
+| Load USASpending | `python scripts/usaspending_api_fetcher.py` |
+| Run UEI pipeline | `python scripts/phase4_canonical_names.py` |
 | DB integrity check | `sqlite3 data/federal_awards.db "PRAGMA integrity_check;"` |
-| Row count + funding | `sqlite3 data/federal_awards.db "SELECT COUNT(*), ROUND(SUM(awd_amount)/1e9,2) FROM nsf_awards;"` |
+| Record count | `sqlite3 data/federal_awards.db "SELECT COUNT(*), ROUND(SUM(awd_amount)/1e9,2) FROM awards;"` |
