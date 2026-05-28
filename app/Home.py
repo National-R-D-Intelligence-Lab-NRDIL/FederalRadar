@@ -1,8 +1,9 @@
 """
-Home.py — Program Explorer
-Federal Radar Streamlit MVP
+Home.py — Federal Radar
+Single-page competitive gap analysis for VPR/AVP.
 
-Answers: "How competitive is this program, and where does my institution rank?"
+Primary question: In [agency/program], where are peers beating us,
+and by how much? Sorted by funding opportunity.
 """
 
 import pandas as pd
@@ -10,23 +11,20 @@ import plotly.express as px
 import streamlit as st
 
 from queries import (
-    get_agencies,
-    get_gap_programs,
-    get_my_institution_rank,
-    get_nih_activity_codes,
+    MY_INSTITUTION,
+    PEER_SHORT,
+    get_fy_bounds,
+    get_my_ueis,
     get_nih_institutes,
     get_nsf_directorates,
     get_nsf_subdiv,
-    get_nsf_programs,
-    get_program_stats,
-    get_state_distribution,
-    get_top_institutions,
-    get_trend,
+    get_peer_institutions,
+    get_raw_comparison,
 )
 
 st.set_page_config(
-    page_title="Federal Radar – Program Explorer",
-    page_icon="🎯",
+    page_title="Federal Radar",
+    page_icon="radar",
     layout="wide",
 )
 
@@ -35,152 +33,287 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.title("🎯 Federal Radar")
-    st.caption("Program Explorer")
+    st.markdown("## Federal Radar")
+    st.caption(MY_INSTITUTION)
+    st.divider()
 
-    my_inst = st.text_input("My Institution", value="NORTH TEXAS")
+    agency = st.selectbox(
+        "Agency",
+        ["nsf", "nih", "dod", "doe", "nasa", "usda", "ed", "commerce"],
+        format_func=str.upper,
+    )
 
-    agencies = get_agencies()
-    source = st.selectbox("Agency", agencies, index=agencies.index("nsf") if "nsf" in agencies else 0)
+    dir_filter = subdiv_filter = institute_filter = None
 
-    division = subdiv = program = institute = activity_code = cfda = None
-
-    if source == "nsf":
-        directorates = get_nsf_directorates()
-        if directorates:
-            division = st.selectbox("Directorate", ["(All)"] + directorates)
-            if division == "(All)":
-                division = None
-        if division:
-            subdivs = get_nsf_subdiv(division)
+    if agency == "nsf":
+        dirs = get_nsf_directorates()
+        choice = st.selectbox("Directorate", ["(All)"] + dirs)
+        dir_filter = choice if choice != "(All)" else None
+        if dir_filter:
+            subdivs = get_nsf_subdiv(dir_filter)
             if subdivs:
-                subdiv = st.selectbox("Division", ["(All)"] + subdivs)
-                if subdiv == "(All)":
-                    subdiv = None
-        if division:
-            programs = get_nsf_programs(division, subdiv)
-            if programs:
-                program = st.selectbox("Program", ["(All)"] + programs)
-                if program == "(All)":
-                    program = None
+                sub = st.selectbox("Division", ["(All)"] + subdivs)
+                subdiv_filter = sub if sub != "(All)" else None
 
-    elif source == "nih":
-        institutes = get_nih_institutes()
-        if institutes:
-            institute = st.selectbox("Institute", ["(All)"] + institutes)
-            if institute == "(All)":
-                institute = None
-        codes = get_nih_activity_codes(institute)
-        if codes:
-            activity_code = st.selectbox("Activity Code", ["(All)"] + codes)
-            if activity_code == "(All)":
-                activity_code = None
-
-    else:
-        cfda = st.text_input("CFDA / Opportunity #", "")
-        if not cfda:
-            cfda = None
+    elif agency == "nih":
+        insts = get_nih_institutes()
+        choice = st.selectbox("Institute", ["(All)"] + insts)
+        institute_filter = choice if choice != "(All)" else None
 
     st.divider()
-    st.caption("Data: NSF, NIH, ED, DOT, NEH · FY2019–2026")
+
+    peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+
+    st.divider()
+
+    fy_min, fy_max = get_fy_bounds()
+    fy_start, fy_end = st.slider(
+        "Fiscal Years",
+        min_value=fy_min,
+        max_value=fy_max,
+        value=(fy_max - 2, fy_max),
+    )
+
+    st.divider()
+    st.caption(f"Data: NSF, NIH, DOD, DOE, NASA, USDA, ED · FY{fy_min}-{fy_max}")
 
 # ---------------------------------------------------------------------------
-# Main content
+# Load data
 # ---------------------------------------------------------------------------
 
-st.header("Program Explorer")
+my_ueis   = tuple(get_my_ueis())
+peer_items = get_peer_institutions(peer_set)
+peer_ueis  = tuple(uei for _, uei in peer_items)
 
-# --- Metrics row ---
-stats = get_program_stats(source, division, subdiv, program, institute, activity_code, cfda)
+df_raw = get_raw_comparison(
+    my_ueis, peer_ueis, agency, fy_start, fy_end,
+    dir_filter, subdiv_filter, institute_filter,
+)
+
+# ---------------------------------------------------------------------------
+# Scope label for header
+# ---------------------------------------------------------------------------
+
+scope_parts = [agency.upper()]
+if dir_filter:
+    scope_parts.append(dir_filter)
+if subdiv_filter:
+    scope_parts.append(subdiv_filter)
+if institute_filter:
+    scope_parts.append(institute_filter)
+scope_label = " / ".join(scope_parts)
+
+st.markdown(f"# {scope_label}")
+st.caption(f"FY{fy_start}–{fy_end}  ·  {peer_set} peers")
+
+# ---------------------------------------------------------------------------
+# Handle unsupported agency or empty data
+# ---------------------------------------------------------------------------
+
+if df_raw.empty:
+    if agency not in ("nsf", "nih"):
+        st.info(
+            f"Program-level gap analysis is available for NSF and NIH. "
+            f"Select one of those agencies to see the competitive breakdown."
+        )
+    else:
+        st.info("No award data found for this filter combination.")
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Build pivot: programs x institutions
+# ---------------------------------------------------------------------------
+
+pivot_n = df_raw.pivot_table(
+    index="program", columns="institution",
+    values="awards", aggfunc="sum", fill_value=0,
+)
+pivot_m = df_raw.pivot_table(
+    index="program", columns="institution",
+    values="funding_m", aggfunc="sum", fill_value=0,
+)
+
+# Ensure UNT column exists
+if MY_INSTITUTION not in pivot_n.columns:
+    pivot_n[MY_INSTITUTION] = 0
+    pivot_m[MY_INSTITUTION] = 0.0
+
+peer_cols = [c for c in pivot_n.columns if c != MY_INSTITUTION]
+
+# ---------------------------------------------------------------------------
+# Scorecard row
+# ---------------------------------------------------------------------------
+
+unt_df   = df_raw[df_raw["institution"] == MY_INSTITUTION]
+peers_df = df_raw[df_raw["institution"] != MY_INSTITUTION]
+
+unt_total_awards  = int(unt_df["awards"].sum())
+unt_total_funding = round(unt_df["funding_m"].sum(), 1)
+
+# Rank UNT vs all peers by total funding in scope
+totals = (
+    df_raw.groupby("institution")["funding_m"]
+    .sum()
+    .sort_values(ascending=False)
+    .reset_index()
+)
+rank_list = totals["institution"].tolist()
+unt_rank  = rank_list.index(MY_INSTITUTION) + 1 if MY_INSTITUTION in rank_list else None
+n_ranked  = len(rank_list)
+
+# Programs where peers are ahead
+if peer_cols:
+    peer_avg_funding = pivot_m[peer_cols].mean(axis=1)
+    dollar_gap       = peer_avg_funding - pivot_m[MY_INSTITUTION]
+    n_gaps           = int((dollar_gap > 0).sum())
+else:
+    n_gaps = 0
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Awards", f"{stats['awards']:,}")
-c2.metric("Total Funding", f"${stats['total_funding']/1e9:.2f}B" if stats['total_funding'] >= 1e9 else f"${stats['total_funding']/1e6:.1f}M")
-c3.metric("Avg Award", f"${stats['avg_award']/1e6:.3f}M")
-c4.metric("Institutions", f"{stats['institutions']:,}")
+c1.metric("UNT Awards",        f"{unt_total_awards:,}")
+c2.metric("UNT Funding",       f"${unt_total_funding:.1f}M")
+c3.metric("Rank Among Peers",  f"#{unt_rank} of {n_ranked}" if unt_rank else "—")
+c4.metric("Programs with Gaps", str(n_gaps))
 
 st.divider()
 
-# --- Two-column layout: Trend + Map ---
-col_left, col_right = st.columns([1, 1])
+# ---------------------------------------------------------------------------
+# Headline — one sentence, most important gap
+# ---------------------------------------------------------------------------
 
-with col_left:
-    st.subheader("Funding Trend")
-    trend_df = get_trend(source, division, subdiv, program, institute, activity_code, cfda)
-    if not trend_df.empty:
-        fig = px.bar(
-            trend_df, x="fiscal_year", y="total_m",
-            labels={"fiscal_year": "Fiscal Year", "total_m": "Total ($M)"},
-            color_discrete_sequence=["#0068C9"],
-        )
-        fig.update_layout(margin=dict(t=10, b=10), height=300)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No trend data available.")
+if peer_cols:
+    peer_avg_awards  = pivot_n[peer_cols].mean(axis=1)
+    dollar_gap       = peer_avg_funding - pivot_m[MY_INSTITUTION]
+    gap_programs     = dollar_gap[dollar_gap > 0].sort_values(ascending=False)
 
-with col_right:
-    st.subheader("Awards by State")
-    state_df = get_state_distribution(source, division, subdiv, program, institute, activity_code, cfda)
-    if not state_df.empty:
-        fig = px.choropleth(
-            state_df,
-            locations="state",
-            locationmode="USA-states",
-            color="total_m",
-            scope="usa",
-            color_continuous_scale="Blues",
-            labels={"total_m": "$M", "state": "State"},
+    if not gap_programs.empty:
+        top_prog      = gap_programs.index[0]
+        unt_awards_top = int(pivot_n.loc[top_prog, MY_INSTITUTION])
+        peer_avg_top   = round(float(peer_avg_awards.loc[top_prog]), 1)
+        gap_m_top      = round(float(gap_programs.iloc[0]), 2)
+
+        # Find the single peer with most awards in top program
+        top_peer_awards = pivot_n.loc[top_prog, peer_cols].sort_values(ascending=False)
+        top_peer_name   = PEER_SHORT.get(top_peer_awards.index[0], top_peer_awards.index[0])
+        top_peer_count  = int(top_peer_awards.iloc[0])
+
+        st.markdown(
+            f"**Biggest gap: {top_prog}** — "
+            f"UNT has **{unt_awards_top} awards**, "
+            f"peers average **{peer_avg_top:.0f}** "
+            f"({top_peer_name} leads with **{top_peer_count}**). "
+            f"Closing this gap = **${gap_m_top:.1f}M** in funding."
         )
-        fig.update_layout(margin=dict(t=10, b=10, l=0, r=0), height=300)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No state data available.")
 
 st.divider()
 
-# --- My Institution Rank ---
-if my_inst.strip():
-    rank_info = get_my_institution_rank(
-        my_inst, source, division, subdiv, program, institute, activity_code, cfda
+# ---------------------------------------------------------------------------
+# Gap table
+# ---------------------------------------------------------------------------
+
+if not peer_cols:
+    st.warning("No peer data found for the selected filters.")
+    st.stop()
+
+# Pick top 7 peers by total awards across all programs (keep table readable)
+top_peer_cols = (
+    pivot_n[peer_cols].sum()
+    .sort_values(ascending=False)
+    .head(7)
+    .index.tolist()
+)
+
+# Build display DataFrame
+rows = []
+for prog in pivot_n.index:
+    unt_val  = int(pivot_n.loc[prog, MY_INSTITUTION])
+    peer_avg = float(pivot_n.loc[prog, peer_cols].mean())
+    gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, MY_INSTITUTION]), 2)
+    row      = {"Program": prog, "UNT": unt_val}
+    for col in top_peer_cols:
+        short      = PEER_SHORT.get(col, col[:8])
+        row[short] = int(pivot_n.loc[prog, col])
+    row["Peer Avg"] = round(peer_avg, 1)
+    row["$ Gap (M)"] = gap_m
+    rows.append(row)
+
+display = (
+    pd.DataFrame(rows)
+    .set_index("Program")
+    .query("`$ Gap (M)` > 0")
+    .sort_values("$ Gap (M)", ascending=False)
+)
+
+st.subheader("Competitive Gap Analysis")
+st.caption(
+    "Programs where peers are outperforming UNT, ranked by funding opportunity. "
+    "Red = trailing badly  |  Yellow = within reach  |  Green = competitive."
+)
+
+if display.empty:
+    st.success("No gaps found — UNT is competitive across all programs in this view.")
+    st.stop()
+
+
+def _color_unt(col):
+    """Color UNT column by ratio to peer avg."""
+    if col.name != "UNT":
+        return [""] * len(col)
+    peer_avg = display["Peer Avg"]
+    styles = []
+    for unt_val, avg_val in zip(col, peer_avg):
+        if avg_val == 0:
+            styles.append("")
+        elif unt_val == 0:
+            styles.append("background-color: #c0392b; color: white")
+        elif unt_val / avg_val < 0.40:
+            styles.append("background-color: #e74c3c; color: white")
+        elif unt_val / avg_val < 0.75:
+            styles.append("background-color: #e67e22; color: white")
+        else:
+            styles.append("background-color: #27ae60; color: white")
+    return styles
+
+
+styled = display.style.apply(_color_unt).format({
+    "Peer Avg": "{:.1f}",
+    "$ Gap (M)": "${:.2f}M",
+})
+
+st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
+
+# ---------------------------------------------------------------------------
+# Peer funding comparison bar chart
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Funding by Institution")
+st.caption("Total funding across all programs in the current filter scope.")
+
+bar_data = (
+    totals.rename(columns={"institution": "Institution", "funding_m": "Funding ($M)"})
+    .assign(
+        Label=lambda d: d["Institution"].map(lambda x: PEER_SHORT.get(x, x)),
+        IsUNT=lambda d: d["Institution"] == MY_INSTITUTION,
     )
-    if rank_info:
-        st.success(
-            f"**{rank_info['name']}** — Rank **#{rank_info['rank']}** of "
-            f"{rank_info['total']:,} institutions · "
-            f"{rank_info['awards']} awards · ${rank_info['total_m']:.2f}M total"
-        )
-    else:
-        st.warning(f"No awards found matching '{my_inst}' in this program.")
+    .sort_values("Funding ($M)", ascending=True)
+)
 
-# --- Top Institutions table ---
-st.subheader("Top 25 Institutions")
-top_df = get_top_institutions(source, division, subdiv, program, institute, activity_code, cfda)
+colors = ["#e74c3c" if is_unt else "#2980b9" for is_unt in bar_data["IsUNT"]]
 
-if not top_df.empty and my_inst.strip():
-    # Highlight my institution rows
-    search_upper = my_inst.upper()
-
-    def _highlight(row):
-        inst = str(row.get("Institution", "")).upper()
-        if search_upper in inst:
-            return ["background-color: #fffacd"] * len(row)
-        return [""] * len(row)
-
-    st.dataframe(top_df.style.apply(_highlight, axis=1), use_container_width=True)
-else:
-    st.dataframe(top_df, use_container_width=True)
-
-# --- Gap Programs (NSF only) ---
-if source == "nsf" and (division or subdiv) and my_inst.strip():
-    st.divider()
-    st.subheader("🔍 Gap Programs")
-    label = subdiv or division
-    st.caption(
-        f"NSF {label} programs where **≥3 peer institutions** win awards "
-        f"but **{my_inst}** has none."
-    )
-    gap_df = get_gap_programs(subdiv or division, my_inst, use_div_abbr=bool(subdiv))
-    if not gap_df.empty:
-        st.dataframe(gap_df, use_container_width=True)
-    else:
-        st.info("No gap programs found — great coverage!")
+fig = px.bar(
+    bar_data,
+    x="Funding ($M)",
+    y="Label",
+    orientation="h",
+    labels={"Label": "", "Funding ($M)": "Total Funding ($M)"},
+    color="IsUNT",
+    color_discrete_map={True: "#e74c3c", False: "#2980b9"},
+)
+fig.update_layout(
+    showlegend=False,
+    margin=dict(t=10, b=10, l=0, r=20),
+    height=max(300, 30 * len(bar_data)),
+    yaxis={"categoryorder": "total ascending"},
+)
+st.plotly_chart(fig, use_container_width=True)

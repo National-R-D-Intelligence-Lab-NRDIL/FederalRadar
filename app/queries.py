@@ -12,6 +12,31 @@ import streamlit as st
 
 DB_PATH = Path(__file__).parent.parent / "data" / "federal_awards.db"
 
+MY_INSTITUTION = "University of North Texas"
+
+PEER_SHORT = {
+    "Texas A&M University":           "A&M",
+    "UT Austin":                       "UT Austin",
+    "UT Arlington":                    "UTA",
+    "UT Dallas":                       "UTD",
+    "UTSA":                            "UTSA",
+    "UTEP":                            "UTEP",
+    "UTRGV":                           "UTRGV",
+    "Texas State University":          "TX State",
+    "Texas Tech University":           "TX Tech",
+    "University of Houston":           "Houston",
+    "Arizona State University":        "ASU",
+    "Purdue University":               "Purdue",
+    "Georgia State University":        "GA State",
+    "University of South Florida":     "USF",
+    "UCF":                             "UCF",
+    "University of Utah":              "Utah",
+    "University of Memphis":           "Memphis",
+    "University of Illinois Chicago":  "UIC",
+    "Tulane University":               "Tulane",
+    "UC Riverside":                    "UCR",
+}
+
 
 def _conn():
     conn = sqlite3.connect(DB_PATH)
@@ -413,3 +438,110 @@ def get_institution_awards(inst_name: str, source: str | None = None,
             conn, params=params,
         )
     return df
+
+
+# ---------------------------------------------------------------------------
+# Peer / gap analysis queries (used by new Home.py)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_my_ueis() -> list[str]:
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT inst_uei FROM institutions WHERE is_my_institution = 1"
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+@st.cache_data(ttl=3600)
+def get_peer_institutions(peer_set: str) -> list[tuple[str, str]]:
+    """Returns (peer_label, inst_uei) for the selected peer set."""
+    if peer_set == "Texas":
+        cond = "is_peer_texas = 1"
+    elif peer_set == "National":
+        cond = "is_peer_national = 1"
+    else:
+        cond = "(is_peer_texas = 1 OR is_peer_national = 1)"
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT peer_label, inst_uei FROM institutions"
+            f" WHERE {cond} ORDER BY peer_label"
+        ).fetchall()
+    return rows
+
+
+@st.cache_data(ttl=3600)
+def get_fy_bounds() -> tuple[int, int]:
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT MIN(fiscal_year), MAX(fiscal_year)"
+            " FROM awards WHERE fiscal_year IS NOT NULL"
+        ).fetchone()
+    return int(row[0]), int(row[1])
+
+
+@st.cache_data(ttl=3600)
+def get_raw_comparison(
+    my_ueis: tuple[str, ...],
+    peer_ueis: tuple[str, ...],
+    agency: str,
+    fy_start: int,
+    fy_end: int,
+    dir_filter: str | None = None,
+    subdiv_filter: str | None = None,
+    institute_filter: str | None = None,
+) -> pd.DataFrame:
+    """
+    Long-form DataFrame: program | institution | awards | funding_m
+    for UNT + all peers combined. Used to build the gap table in Home.py.
+    """
+    all_ueis = my_ueis + peer_ueis
+    if not all_ueis:
+        return pd.DataFrame()
+
+    # Determine program grouping column
+    if agency == "nsf":
+        if subdiv_filter:
+            prog_col = "pgm_ele_name"
+        elif dir_filter:
+            prog_col = "div_abbr"
+        else:
+            prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "activity_code" if institute_filter else "nih_institute"
+    else:
+        return pd.DataFrame()
+
+    placeholders = ",".join("?" * len(all_ueis))
+    clauses = [
+        "source = ?",
+        "fiscal_year BETWEEN ? AND ?",
+        f"inst_uei IN ({placeholders})",
+        f"{prog_col} IS NOT NULL",
+        f"TRIM({prog_col}) != ''",
+    ]
+    params: list = [agency, fy_start, fy_end] + list(all_ueis)
+
+    if agency == "nsf":
+        if dir_filter:
+            clauses.append("dir_abbr = ?")
+            params.append(dir_filter)
+        if subdiv_filter:
+            clauses.append("div_abbr = ?")
+            params.append(subdiv_filter)
+    elif agency == "nih" and institute_filter:
+        clauses.append("nih_institute = ?")
+        params.append(institute_filter)
+
+    sql = f"""
+        SELECT {prog_col} AS program,
+               inst_canonical_name AS institution,
+               COUNT(*) AS awards,
+               ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 3) AS funding_m
+        FROM awards
+        WHERE {" AND ".join(clauses)}
+          AND inst_canonical_name IS NOT NULL
+        GROUP BY {prog_col}, inst_canonical_name
+    """
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
