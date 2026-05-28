@@ -530,6 +530,62 @@ def get_fy_bounds() -> tuple[int, int]:
 
 
 @st.cache_data(ttl=3600)
+def get_field_wide_stats(
+    agency: str,
+    fy_start: int,
+    fy_end: int,
+    dir_filter: str | None = None,
+    subdiv_filter: str | None = None,
+    institute_filter: str | None = None,
+) -> pd.DataFrame:
+    """
+    Field-wide totals per program (ALL institutions, not just peers).
+    Returns: program_abbr | field_awards | last_funded
+    """
+    if agency == "nsf":
+        if subdiv_filter:
+            prog_col = "pgm_ele_name"
+        elif dir_filter:
+            prog_col = "div_abbr"
+        else:
+            prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "activity_code" if institute_filter else "nih_institute"
+    else:
+        return pd.DataFrame()
+
+    clauses = [
+        "source = ?",
+        "fiscal_year BETWEEN ? AND ?",
+        f"{prog_col} IS NOT NULL",
+        f"TRIM({prog_col}) != ''",
+    ]
+    params: list = [agency, fy_start, fy_end]
+
+    if agency == "nsf":
+        if dir_filter:
+            clauses.append("dir_abbr = ?")
+            params.append(dir_filter)
+        if subdiv_filter:
+            clauses.append("div_abbr = ?")
+            params.append(subdiv_filter)
+    elif agency == "nih" and institute_filter:
+        clauses.append("nih_institute = ?")
+        params.append(institute_filter)
+
+    sql = f"""
+        SELECT {prog_col} AS program_abbr,
+               COUNT(*) AS field_awards,
+               MAX(fiscal_year) AS last_funded
+        FROM awards
+        WHERE {" AND ".join(clauses)}
+        GROUP BY {prog_col}
+    """
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
 def get_raw_comparison(
     my_ueis: tuple[str, ...],
     peer_ueis: tuple[str, ...],

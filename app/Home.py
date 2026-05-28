@@ -15,6 +15,7 @@ from queries import (
     NSF_DIR_NAMES,
     NSF_DIV_NAMES,
     PEER_SHORT,
+    get_field_wide_stats,
     get_fy_bounds,
     get_my_ueis,
     get_nih_institutes,
@@ -97,6 +98,10 @@ peer_ueis  = tuple(uei for _, uei in peer_items)
 
 df_raw = get_raw_comparison(
     my_ueis, peer_ueis, agency, fy_start, fy_end,
+    dir_filter, subdiv_filter, institute_filter,
+)
+df_field = get_field_wide_stats(
+    agency, fy_start, fy_end,
     dir_filter, subdiv_filter, institute_filter,
 )
 
@@ -243,6 +248,12 @@ top_peer_cols = (
 )
 
 # Build display DataFrame
+# Build field-wide lookup: program_abbr -> (field_awards, last_funded)
+field_lookup = {}
+if not df_field.empty:
+    for _, r in df_field.iterrows():
+        field_lookup[r["program_abbr"]] = (int(r["field_awards"]), int(r["last_funded"]))
+
 rows = []
 for prog in pivot_n.index:
     full_name = abbr_to_name.get(prog, prog)
@@ -251,12 +262,15 @@ for prog in pivot_n.index:
     unt_val  = int(pivot_n.loc[prog, MY_INSTITUTION])
     peer_avg = float(pivot_n.loc[prog, peer_cols].mean())
     gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, MY_INSTITUTION]), 2)
-    row      = {"Program": full_name, "UNT": unt_val}
+    field_awards, last_funded = field_lookup.get(prog, (0, 0))
+    row = {"Program": full_name, "UNT": unt_val}
     for col in top_peer_cols:
         short      = PEER_SHORT.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
-    row["Peer Avg"] = round(peer_avg, 1)
+    row["Peer Avg"]        = round(peer_avg, 1)
     row["Opportunity ($M)"] = gap_m
+    row["Field Total"]     = field_awards
+    row["Last Funded"]     = last_funded if last_funded else "—"
     rows.append(row)
 
 display = (
@@ -306,8 +320,9 @@ def _color_unt(col):
 
 
 styled = display.style.apply(_color_unt).format({
-    "Peer Avg": "{:.1f}",
+    "Peer Avg":         "{:.1f}",
     "Opportunity ($M)": "${:.2f}M",
+    "Field Total":      "{:,}",
 })
 
 st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
