@@ -135,17 +135,21 @@ if df_raw.empty:
 # ---------------------------------------------------------------------------
 
 pivot_n = df_raw.pivot_table(
-    index="program", columns="institution",
+    index="program_abbr", columns="institution",
     values="awards", aggfunc="sum", fill_value=0,
 )
 pivot_m = df_raw.pivot_table(
-    index="program", columns="institution",
+    index="program_abbr", columns="institution",
     values="funding_m", aggfunc="sum", fill_value=0,
 )
 
-# Shorten long program names for display (cap at 45 chars)
-pivot_n.index = pivot_n.index.map(lambda x: x if len(x) <= 45 else x[:42] + "...")
-pivot_m.index = pivot_m.index.map(lambda x: x if len(x) <= 45 else x[:42] + "...")
+# Build abbr -> full name mapping from the data for display
+abbr_to_name = (
+    df_raw[["program_abbr", "program"]]
+    .drop_duplicates("program_abbr")
+    .set_index("program_abbr")["program"]
+    .to_dict()
+)
 
 # Ensure UNT column exists
 if MY_INSTITUTION not in pivot_n.columns:
@@ -201,7 +205,8 @@ if peer_cols:
     gap_programs     = dollar_gap[dollar_gap > 0].sort_values(ascending=False)
 
     if not gap_programs.empty:
-        top_prog      = gap_programs.index[0]
+        top_prog       = gap_programs.index[0]
+        top_prog_label = abbr_to_name.get(top_prog, top_prog)
         unt_awards_top = int(pivot_n.loc[top_prog, MY_INSTITUTION])
         peer_avg_top   = round(float(peer_avg_awards.loc[top_prog]), 1)
         gap_m_top      = round(float(dollar_gap[top_prog]), 2)
@@ -212,7 +217,7 @@ if peer_cols:
         top_peer_count  = int(top_peer_awards.iloc[0])
 
         st.markdown(
-            f"**Biggest gap: {top_prog}** — "
+            f"**Biggest gap: {top_prog_label}** — "
             f"UNT has **{unt_awards_top} awards**, "
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
@@ -240,10 +245,13 @@ top_peer_cols = (
 # Build display DataFrame
 rows = []
 for prog in pivot_n.index:
+    full_name = abbr_to_name.get(prog, prog)
+    if len(full_name) > 45:
+        full_name = full_name[:42] + "..."
     unt_val  = int(pivot_n.loc[prog, MY_INSTITUTION])
     peer_avg = float(pivot_n.loc[prog, peer_cols].mean())
     gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, MY_INSTITUTION]), 2)
-    row      = {"Program": prog, "UNT": unt_val}
+    row      = {"Program": full_name, "UNT": unt_val}
     for col in top_peer_cols:
         short      = PEER_SHORT.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
