@@ -12,6 +12,8 @@ import streamlit as st
 
 from queries import (
     MY_INSTITUTION,
+    NSF_DIR_NAMES,
+    NSF_DIV_NAMES,
     PEER_SHORT,
     get_fy_bounds,
     get_my_ueis,
@@ -47,13 +49,21 @@ with st.sidebar:
 
     if agency == "nsf":
         dirs = get_nsf_directorates()
-        choice = st.selectbox("Directorate", ["(All)"] + dirs)
-        dir_filter = choice if choice != "(All)" else None
+        dir_labels = {d: f"{d} — {NSF_DIR_NAMES[d]}" if d in NSF_DIR_NAMES else d for d in dirs}
+        dir_choice = st.selectbox(
+            "Directorate", ["(All)"] + dirs,
+            format_func=lambda x: dir_labels.get(x, x) if x != "(All)" else "(All)",
+        )
+        dir_filter = dir_choice if dir_choice != "(All)" else None
         if dir_filter:
             subdivs = get_nsf_subdiv(dir_filter)
             if subdivs:
-                sub = st.selectbox("Division", ["(All)"] + subdivs)
-                subdiv_filter = sub if sub != "(All)" else None
+                div_labels = {d: f"{d} — {NSF_DIV_NAMES[d]}" if d in NSF_DIV_NAMES else d for d in subdivs}
+                sub_choice = st.selectbox(
+                    "Division", ["(All)"] + subdivs,
+                    format_func=lambda x: div_labels.get(x, x) if x != "(All)" else "(All)",
+                )
+                subdiv_filter = sub_choice if sub_choice != "(All)" else None
 
     elif agency == "nih":
         insts = get_nih_institutes()
@@ -133,6 +143,10 @@ pivot_m = df_raw.pivot_table(
     values="funding_m", aggfunc="sum", fill_value=0,
 )
 
+# Shorten long program names for display (cap at 45 chars)
+pivot_n.index = pivot_n.index.map(lambda x: x if len(x) <= 45 else x[:42] + "...")
+pivot_m.index = pivot_m.index.map(lambda x: x if len(x) <= 45 else x[:42] + "...")
+
 # Ensure UNT column exists
 if MY_INSTITUTION not in pivot_n.columns:
     pivot_n[MY_INSTITUTION] = 0
@@ -190,7 +204,7 @@ if peer_cols:
         top_prog      = gap_programs.index[0]
         unt_awards_top = int(pivot_n.loc[top_prog, MY_INSTITUTION])
         peer_avg_top   = round(float(peer_avg_awards.loc[top_prog]), 1)
-        gap_m_top      = round(float(gap_programs.iloc[0]), 2)
+        gap_m_top      = round(float(dollar_gap[top_prog]), 2)
 
         # Find the single peer with most awards in top program
         top_peer_awards = pivot_n.loc[top_prog, peer_cols].sort_values(ascending=False)
@@ -234,20 +248,21 @@ for prog in pivot_n.index:
         short      = PEER_SHORT.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
     row["Peer Avg"] = round(peer_avg, 1)
-    row["$ Gap (M)"] = gap_m
+    row["Opportunity ($M)"] = gap_m
     rows.append(row)
 
 display = (
     pd.DataFrame(rows)
     .set_index("Program")
-    .query("`$ Gap (M)` > 0")
-    .sort_values("$ Gap (M)", ascending=False)
+    .query("`Opportunity ($M)` > 0")
+    .sort_values("Opportunity ($M)", ascending=False)
 )
 
 st.subheader("Competitive Gap Analysis")
 st.caption(
-    "Programs where peers are outperforming UNT, ranked by funding opportunity. "
-    "Red = trailing badly  |  Yellow = within reach  |  Green = competitive."
+    "Programs where peers are outperforming UNT, ranked by opportunity size. "
+    "**Opportunity ($M)** = additional funding UNT would receive if it matched the peer average. "
+    "Color = UNT awards vs peer average: red = trailing badly | orange = within reach | green = competitive."
 )
 
 if display.empty:
@@ -277,7 +292,7 @@ def _color_unt(col):
 
 styled = display.style.apply(_color_unt).format({
     "Peer Avg": "{:.1f}",
-    "$ Gap (M)": "${:.2f}M",
+    "Opportunity ($M)": "${:.2f}M",
 })
 
 st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
@@ -287,8 +302,8 @@ st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(dis
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.subheader("Funding by Institution")
-st.caption("Total funding across all programs in the current filter scope.")
+st.subheader("Total Funding by Institution")
+st.caption("Total dollars awarded across all programs in the current scope. UNT shown in red.")
 
 bar_data = (
     totals.rename(columns={"institution": "Institution", "funding_m": "Funding ($M)"})

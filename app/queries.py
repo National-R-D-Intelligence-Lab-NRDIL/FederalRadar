@@ -14,6 +14,55 @@ DB_PATH = Path(__file__).parent.parent / "data" / "federal_awards.db"
 
 MY_INSTITUTION = "University of North Texas"
 
+# Full names for NSF directorate and division abbreviations (from raw_json)
+NSF_DIR_NAMES = {
+    "BIO":  "Biological Sciences",
+    "CSE":  "Computer & Information Science & Engineering",
+    "EDU":  "STEM Education",
+    "ENG":  "Engineering",
+    "GEO":  "Geosciences",
+    "MPS":  "Mathematical & Physical Sciences",
+    "SBE":  "Social, Behavioral & Economic Sciences",
+    "TIP":  "Technology, Innovation & Partnerships",
+    "O/D":  "Office of the Director",
+    "BFA":  "Budget, Finance & Award Management",
+    "IRM":  "Information & Resource Management",
+    "NCO":  "National Coordination Office",
+    "NNCO": "National Nanotechnology Coordinating Office",
+    "OCIO": "Office of the Chief Information Officer",
+}
+
+NSF_DIV_NAMES = {
+    "AGS":  "Atmospheric & Geospace Sciences",
+    "AST":  "Astronomical Sciences",
+    "BCS":  "Behavioral & Cognitive Sciences",
+    "CBET": "Chemical, Bioengineering, Environmental & Transport Systems",
+    "CCF":  "Computing & Communication Foundations",
+    "CHE":  "Chemistry",
+    "CMMI": "Civil, Mechanical & Manufacturing Innovation",
+    "CNS":  "Computer & Network Systems",
+    "DBI":  "Biological Infrastructure",
+    "DEB":  "Environmental Biology",
+    "DGE":  "Graduate Education",
+    "DMR":  "Materials Research",
+    "DMS":  "Mathematical Sciences",
+    "DRL":  "Research on Learning",
+    "DUE":  "Undergraduate Education",
+    "EAR":  "Earth Sciences",
+    "ECCS": "Electrical, Communications & Cyber Systems",
+    "EEC":  "Engineering Education & Centers",
+    "EES":  "Equity for Excellence in STEM",
+    "EF":   "Emerging Frontiers",
+    "IIS":  "Information & Intelligent Systems",
+    "IOS":  "Integrative Organismal Systems",
+    "MCB":  "Molecular & Cellular Biosciences",
+    "OCE":  "Ocean Sciences",
+    "OPP":  "Polar Programs",
+    "PHY":  "Physics",
+    "SES":  "Social & Economic Sciences",
+    "SMA":  "Science of Science & Innovation Policy",
+}
+
 PEER_SHORT = {
     "Texas A&M University":           "A&M",
     "UT Austin":                       "UT Austin",
@@ -533,8 +582,17 @@ def get_raw_comparison(
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
 
+    # Include full name column where available
+    if agency == "nsf" and prog_col == "dir_abbr":
+        name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+    elif agency == "nsf" and prog_col == "div_abbr":
+        name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+    else:
+        name_expr = prog_col  # pgm_ele_name and NIH fields already have full names
+
     sql = f"""
-        SELECT {prog_col} AS program,
+        SELECT {prog_col} AS program_abbr,
+               {name_expr} AS program,
                inst_canonical_name AS institution,
                COUNT(*) AS awards,
                ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 3) AS funding_m
