@@ -859,3 +859,168 @@ def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
         "negative_excluded": row[3],
         "zero_count": row[4],
     }
+
+
+# ---------------------------------------------------------------------------
+# Portfolio Risk queries
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_portfolio_by_agency(inst_name: str, fy_start: int, fy_end: int) -> pd.DataFrame:
+    """Funding breakdown by agency for one institution.
+    Returns: source | awards | funding_m
+    """
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            """SELECT source,
+                      COUNT(*) AS awards,
+                      ROUND(SUM(awd_amount) / 1e6, 2) AS funding_m
+               FROM awards
+               WHERE inst_canonical_name = ?
+                 AND fiscal_year BETWEEN ? AND ?
+                 AND awd_amount > 0
+               GROUP BY source
+               ORDER BY funding_m DESC""",
+            conn, params=(inst_name, fy_start, fy_end),
+        )
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_portfolio_trend(inst_name: str, fy_start: int, fy_end: int) -> pd.DataFrame:
+    """Funding by agency and FY for one institution.
+    Returns: fiscal_year | source | funding_m
+    """
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            """SELECT fiscal_year, source,
+                      ROUND(SUM(awd_amount) / 1e6, 2) AS funding_m
+               FROM awards
+               WHERE inst_canonical_name = ?
+                 AND fiscal_year BETWEEN ? AND ?
+                 AND awd_amount > 0
+                 AND fiscal_year IS NOT NULL
+               GROUP BY fiscal_year, source
+               ORDER BY fiscal_year, source""",
+            conn, params=(inst_name, fy_start, fy_end),
+        )
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_peer_diversification(inst_names: tuple[str, ...],
+                             fy_start: int, fy_end: int) -> pd.DataFrame:
+    """Concentration metrics per institution.
+    Returns: institution | top_source | top_pct | n_sources | hhi
+    """
+    if not inst_names:
+        return pd.DataFrame()
+    placeholders = ",".join("?" * len(inst_names))
+    sql = f"""
+        SELECT inst_canonical_name AS institution, source,
+               SUM(awd_amount) AS funding
+        FROM awards
+        WHERE inst_canonical_name IN ({placeholders})
+          AND fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+        GROUP BY inst_canonical_name, source
+    """
+    params = list(inst_names) + [fy_start, fy_end]
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    if df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for inst, grp in df.groupby("institution"):
+        total = grp["funding"].sum()
+        if total <= 0:
+            continue
+        grp = grp.copy()
+        grp["share"] = grp["funding"] / total
+        top = grp.loc[grp["share"].idxmax()]
+        hhi = round((grp["share"] ** 2).sum(), 4)
+        rows.append({
+            "institution": inst,
+            "top_source": top["source"],
+            "top_pct": round(top["share"] * 100, 1),
+            "n_sources": len(grp),
+            "hhi": hhi,
+        })
+    return pd.DataFrame(rows).sort_values("top_pct", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Expiring Awards queries
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_expiring_awards(inst_name: str, horizon_date: str,
+                        agency: str | None = None) -> pd.DataFrame:
+    """Awards ending between today and horizon_date.
+    Returns: awd_id | pi_name | source | program | awd_amount | project_end_date | title
+    """
+    clauses = [
+        "inst_canonical_name = ?",
+        "project_end_date >= date('now')",
+        "project_end_date <= ?",
+        "awd_amount > 0",
+    ]
+    params: list = [inst_name, horizon_date]
+    if agency:
+        clauses.append("source = ?")
+        params.append(agency)
+    where = " AND ".join(clauses)
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            f"""SELECT awd_id,
+                       pi_name,
+                       source,
+                       CASE
+                         WHEN source = 'nsf' THEN dir_abbr
+                         WHEN source = 'nih' THEN nih_institute
+                         ELSE opportunity_number
+                       END AS program,
+                       awd_amount,
+                       project_end_date,
+                       awd_titl_txt AS title
+                FROM awards
+                WHERE {where}
+                ORDER BY project_end_date""",
+            conn, params=params,
+        )
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_expiring_summary(inst_name: str, horizon_date: str,
+                         agency: str | None = None) -> dict:
+    """Aggregate stats for expiring awards scorecard."""
+    clauses = [
+        "inst_canonical_name = ?",
+        "project_end_date >= date('now')",
+        "project_end_date <= ?",
+        "awd_amount > 0",
+    ]
+    params: list = [inst_name, horizon_date]
+    if agency:
+        clauses.append("source = ?")
+        params.append(agency)
+    where = " AND ".join(clauses)
+    with _conn() as conn:
+        row = conn.execute(
+            f"""SELECT COUNT(*) AS total_awards,
+                       ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 2) AS total_funding_m,
+                       ROUND(COALESCE(MAX(awd_amount), 0) / 1e6, 2) AS largest_award_m,
+                       COUNT(DISTINCT CASE WHEN pi_name IS NOT NULL AND pi_name != ''
+                                           THEN pi_name END) AS pis_affected
+                FROM awards
+                WHERE {where}""",
+            params,
+        ).fetchone()
+    return {
+        "total_awards": row[0],
+        "total_funding_m": row[1],
+        "largest_award_m": row[2],
+        "pis_affected": row[3],
+    }

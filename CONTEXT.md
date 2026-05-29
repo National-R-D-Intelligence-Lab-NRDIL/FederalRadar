@@ -1,6 +1,6 @@
 # Federal Radar — Technical Context & Decision Log
 
-**Last updated:** 2026-05-28
+**Last updated:** 2026-05-29
 **Purpose:** Single source of truth for every significant technical decision made during
 development. Anyone picking up this project — new developer, stakeholder, or future self —
 should be able to read this and understand not just what we built, but why.
@@ -43,7 +43,9 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 | File | Purpose |
 |------|---------|
 | `src/db.py` | Schema, upsert logic, indexes, SQLite pragmas |
-| `app/Home.py` | Streamlit UI — single-page competitive gap analysis |
+| `app/Home.py` | Streamlit UI — competitive gap analysis (main page) |
+| `app/pages/1_Portfolio_Risk.py` | Portfolio Risk — agency concentration, what-if, peer HHI |
+| `app/pages/2_Expiring_Awards.py` | Expiring Awards — funding cliff, expiring awards table |
 | `app/queries.py` | All DB queries with 1-hour cache; peer config constants |
 | `scripts/usaspending_api_fetcher.py` | USASpending bulk download + load (ED, DOT, NEH, DOD, etc.) |
 | `scripts/nih_api_fetcher.py` | NIH RePORTER API fetcher |
@@ -60,6 +62,8 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 - [x] Institutions reference table (19,433 rows, UEI as key, canonical names)
 - [x] Peer institution configuration (25 UEIs flagged across Texas + National peers)
 - [x] Streamlit competitive gap analysis dashboard (Home.py)
+- [x] Portfolio Risk page — agency concentration donut, what-if scenario, peer HHI table, agency trend
+- [x] Expiring Awards page — scorecard, quarterly funding cliff chart, awards table with CSV, agency breakdown
 - [x] Upsert logic: fiscal_year never overwritten, awd_amount takes MAX
 - [x] Crash-safe .done sentinel system for downloads
 - [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
@@ -71,9 +75,11 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 
 ### Streamlit App
 - Run with: `streamlit run app/Home.py` (from the `app/` directory)
-- Single page: agency/program selector → scorecard → gap table → bar chart
+- 3 pages via Streamlit multipage: Home (gap analysis), Portfolio Risk, Expiring Awards
+- Home: agency/program selector → scorecard → gap table → bar chart → heatmap → Sankey
+- Portfolio Risk: agency concentration donut → what-if cut scenario → peer HHI table → agency trend
+- Expiring Awards: scorecard → quarterly cliff chart → sortable awards table (CSV) → agency breakdown
 - Peers always visible — gap analysis is the primary interaction
-- Institution Breakdown page was dropped (product decision — see Section 13)
 
 ### Critical Gotchas
 - **NIH `awd_amount`** = total project value (post-dedup sum of annual budgets) — comparable to NSF/USASpending
@@ -543,7 +549,49 @@ this, column headers overflow the table width.
 
 ---
 
-## 13. What Was Dropped
+## 13. Portfolio Risk & Expiring Awards Pages (Added 2026-05-29)
+
+### 13.1 Portfolio Risk (`app/pages/1_Portfolio_Risk.py`)
+
+**Question it answers:** "How exposed are we if an agency gets cut?"
+
+**Audience:** Provost/board meetings — strategic planning.
+
+**Components:**
+1. **Donut chart** — UNT funding by agency with percentages. Red warning if any single agency > 50%.
+2. **What-If Scenario** — Pick agency + cut percentage (10–50%). Shows before/after funding impact. Simple math on the donut data, no new query.
+3. **Peer Diversification Table** — Institution | Top Agency | Top Agency % | # Agencies | HHI. Sorted by concentration (most at-risk first). UNT row highlighted yellow.
+4. **Agency Trend** — Grouped bar chart showing UNT's funding by FY per agency.
+
+**New queries:**
+- `get_portfolio_by_agency(inst_name, fy_start, fy_end)` — GROUP BY source for one institution
+- `get_portfolio_trend(inst_name, fy_start, fy_end)` — GROUP BY fiscal_year, source
+- `get_peer_diversification(inst_names, fy_start, fy_end)` — HHI + top agency share per institution
+
+### 13.2 Expiring Awards (`app/pages/2_Expiring_Awards.py`)
+
+**Question it answers:** "What funding are we about to lose?"
+
+**Audience:** Operational — drives action this week (PI outreach, renewal planning).
+
+**Components:**
+1. **Scorecard** — Awards expiring | Funding at risk ($M) | Largest expiration | PIs affected
+2. **Funding Cliff Chart** — Stacked bar by quarter showing how much expires when, colored by agency.
+3. **Expiring Awards Table** — End Date | PI | Agency | Program | Amount | Title. Sorted by end date. CSV download.
+4. **Agency Breakdown** — Horizontal bar: which agencies have the most expiring funding.
+
+**New queries:**
+- `get_expiring_awards(inst_name, horizon_date, agency)` — awards where project_end_date BETWEEN today AND horizon
+- `get_expiring_summary(inst_name, horizon_date, agency)` — aggregate stats for scorecard
+
+**Data notes:**
+- 99% of awards have `project_end_date` (406K of 410K)
+- PI names available for NSF/NIH only; shows "—" for others
+- UNT has ~200 awards with end dates from 2025 onward
+
+---
+
+## 14. What Was Dropped
 
 | Item | Reason |
 |---|---|
@@ -554,7 +602,7 @@ this, column headers overflow the table width.
 
 ---
 
-## 14. Performance Rules and Lessons
+## 15. Performance Rules and Lessons
 
 1. **Batch everything.** Never insert/update one record at a time. Use `executemany` with batches of 500–1000.
 2. **Indexes before bulk updates.** A `WHERE UPPER(inst_name) = UPPER(?)` on 156K rows without an index = 147s for 785 queries. With index = seconds.
@@ -565,7 +613,7 @@ this, column headers overflow the table width.
 
 ---
 
-## 15. Database Indexes
+## 16. Database Indexes
 
 All created idempotently via `init_db()` in `src/db.py`.
 
@@ -591,7 +639,7 @@ All created idempotently via `init_db()` in `src/db.py`.
 
 ---
 
-## 16. File Structure
+## 17. File Structure
 
 ```
 Federal Radar/
@@ -604,6 +652,9 @@ Federal Radar/
 │           └── ...
 ├── app/
 │   ├── Home.py                        Streamlit — competitive gap analysis
+│   ├── pages/
+│   │   ├── 1_Portfolio_Risk.py        Agency concentration, what-if, peer HHI
+│   │   └── 2_Expiring_Awards.py       Funding cliff, expiring awards table
 │   └── queries.py                     All DB queries, peer config, constants
 ├── scripts/
 │   ├── nsf_etl.py                     NSF bulk ZIP loader
@@ -629,7 +680,7 @@ Federal Radar/
 
 ---
 
-## 17. What Is NOT in the DB (Known Gaps)
+## 18. What Is NOT in the DB (Known Gaps)
 
 | Gap | Reason | Plan |
 |---|---|---|

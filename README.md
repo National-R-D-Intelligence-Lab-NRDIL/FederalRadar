@@ -31,10 +31,25 @@ Federal Radar answers one primary question for VPR/AVP-Research offices:
 
 > **In [agency/program], where are peers beating us, and by how much?**
 
-The Streamlit dashboard shows:
+The Streamlit dashboard has three pages:
+
+**Home — Competitive Gap Analysis**
 - A 4-metric scorecard (UNT awards, funding, rank among peers, programs with gaps)
 - A program breakdown table sorted by funding gap (all programs, peers side by side)
 - A bar chart comparing all peer institutions by total funding
+- Program activity heatmap and funding flow Sankey diagram
+
+**Portfolio Risk**
+- Agency concentration donut chart with warnings when a single agency > 50%
+- What-if scenario: model the impact of a 10–50% cut to any agency
+- Peer diversification table with HHI scores (sorted by concentration risk)
+- Agency funding trend by fiscal year
+
+**Expiring Awards**
+- Scorecard: awards expiring, funding at risk, largest expiration, PIs affected
+- Quarterly funding cliff chart (stacked by agency)
+- Sortable awards table with CSV download
+- Agency breakdown of expiring funding
 
 Peers are pre-configured in the database — two sets available:
 - **Texas peers:** Texas A&M, UT Austin, UT Arlington, UT Dallas, UTSA, UTEP, UTRGV, Texas State, Texas Tech, University of Houston
@@ -83,11 +98,14 @@ The app opens at `http://localhost:8501`.
 - **Peer Set** — Texas, National, or Both
 - **Fiscal Years** — slider, defaults to last 3 years
 
-**What you see:**
+**What you see (Home page):**
 1. Scorecard row: UNT Awards · UNT Funding · Rank Among Peers · Programs with Gaps
 2. Headline: one-sentence summary of the biggest gap program
 3. Program Breakdown table: all programs sorted by Opportunity ($M), peers side by side
 4. Bar chart: total funding comparison across all institutions
+5. Program activity heatmap and funding flow Sankey diagram
+
+**Navigation:** Sidebar shows all 3 pages — Home, Portfolio Risk, Expiring Awards
 
 **Reading the table:**
 - **Opportunity ($M)** = how much more funding UNT would receive if it matched the peer average. Negative = UNT is already at or above peer average.
@@ -298,6 +316,9 @@ sqlite3 data/federal_awards.db "
 Federal Radar/
 ├── app/
 │   ├── Home.py                        Streamlit app — competitive gap analysis
+│   ├── pages/
+│   │   ├── 1_Portfolio_Risk.py        Agency concentration, what-if, peer HHI
+│   │   └── 2_Expiring_Awards.py       Funding cliff, expiring awards table
 │   └── queries.py                     DB queries, peer config, NSF name constants
 ├── data/
 │   ├── federal_awards.db              SQLite, WAL mode, ~2GB
