@@ -5,8 +5,58 @@
     "note": "Baseline captured 2026-05-23 from NSF ZIP bulk load (2016-2026). Update after each full reload."
   },
   "nih": {
-    "expected_record_count": null,
-    "expected_funding_billions": null,
-    "note": "Fill in after running: python scripts/nih_api_fetcher.py --fiscal-years '2024,2025'"
+    "expected_record_count": 156439,
+    "expected_funding_billions": 223.1346,
+    "note": "Baseline captured 2026-05-28 from NIH API. Update after each full reload."
+  },
+  "dod": {
+    "expected_record_count": 26408,
+    "expected_funding_billions": 31.6516,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "doe": {
+    "expected_record_count": 10395,
+    "expected_funding_billions": 24.4303,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "nasa": {
+    "expected_record_count": 17424,
+    "expected_funding_billions": 10.6325,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "usda": {
+    "expected_record_count": 27276,
+    "expected_funding_billions": 18.3755,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "ed": {
+    "expected_record_count": 74901,
+    "expected_funding_billions": 126.8825,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "commerce": {
+    "expected_record_count": 6749,
+    "expected_funding_billions": 11.5473,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "dhs": {
+    "expected_record_count": 150,
+    "expected_funding_billions": 0.3234,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "dot": {
+    "expected_record_count": 2912,
+    "expected_funding_billions": 3.3745,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "epa": {
+    "expected_record_count": 1595,
+    "expected_funding_billions": 2.4615,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
+  },
+  "neh": {
+    "expected_record_count": 2703,
+    "expected_funding_billions": 0.4163,
+    "note": "Baseline captured 2026-05-28 from USASpending. Update after each full reload."
   }
 }

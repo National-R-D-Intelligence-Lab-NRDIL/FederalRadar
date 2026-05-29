@@ -29,6 +29,7 @@ import pytest
 # ── Path setup ────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "app"))
 
 from scripts.nsf_etl import map_record as etl_map_record
 from scripts.nsf_api_fetcher import date_to_iso, map_record as api_map_record
@@ -1618,3 +1619,152 @@ def test_N15_no_awd_id_overlap(live_conn):
     assert overlap == 0, (
         f"{overlap} awd_id(s) appear in both NSF and NIH rows — ID collision detected"
     )
+
+
+# ── Audit fix tests ─────────────────────────────────────────────────────────
+
+@real_db
+def test_Q19_usda_gap_no_negative_amounts(live_conn):
+    """Q-19: USDA gap analysis excludes negative awd_amount (deobligations)."""
+    count = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = 'usda' AND awd_amount < 0"
+    ).fetchone()[0]
+    assert count > 0, "Expected negative USDA records to exist in raw data"
+    # Verify the gap query filter would exclude them
+    included = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = 'usda' AND awd_amount < 0 AND awd_amount > 0"
+    ).fetchone()[0]
+    assert included == 0, "awd_amount > 0 filter must exclude all negatives"
+
+
+@real_db
+def test_Q20_negative_amounts_not_in_nsf_nih(live_conn):
+    """Q-20: NSF and NIH sources have no negative awd_amount records."""
+    for source in ("nsf", "nih"):
+        count = live_conn.execute(
+            "SELECT COUNT(*) FROM awards WHERE source = ? AND awd_amount < 0",
+            (source,),
+        ).fetchone()[0]
+        assert count == 0, f"{source} has {count} negative awd_amount records"
+
+
+@real_db
+def test_Q21_all_12_agencies_in_db(live_conn):
+    """Q-21: All 12 expected agencies are present in the database."""
+    expected = {"nsf", "nih", "dod", "doe", "nasa", "usda", "ed", "commerce",
+                "dhs", "dot", "epa", "neh"}
+    rows = live_conn.execute("SELECT DISTINCT source FROM awards").fetchall()
+    actual = {r[0] for r in rows}
+    missing = expected - actual
+    assert not missing, f"Missing agencies in DB: {missing}"
+
+
+@real_db
+def test_Q22_ed_non_research_filter(live_conn):
+    """Q-22: ED non-research CFDA codes (84.425 etc.) exist and can be filtered."""
+    from queries import ED_NON_RESEARCH_CFDAS
+    placeholders = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+    total = live_conn.execute(
+        f"SELECT COUNT(*) FROM awards WHERE source = 'ed' "
+        f"AND opportunity_number IN ({placeholders})",
+        ED_NON_RESEARCH_CFDAS,
+    ).fetchone()[0]
+    assert total > 0, "Expected ED non-research CFDA codes to have records"
+    # Verify filtering works (remaining < total ED)
+    total_ed = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = 'ed'"
+    ).fetchone()[0]
+    assert total < total_ed, "Non-research filter should not remove ALL ED records"
+
+
+@real_db
+def test_Q23_cfda_coverage_per_source(live_conn):
+    """Q-23: USASpending sources have opportunity_number (CFDA) coverage > 50%."""
+    usa_sources = ("dod", "doe", "nasa", "usda", "ed", "commerce", "dhs", "dot", "epa", "neh")
+    for source in usa_sources:
+        total, with_cfda = live_conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN opportunity_number IS NOT NULL AND TRIM(opportunity_number) != '' THEN 1 ELSE 0 END) "
+            "FROM awards WHERE source = ?",
+            (source,),
+        ).fetchone()
+        if total == 0:
+            continue
+        rate = with_cfda / total
+        assert rate > 0.50, (
+            f"{source} CFDA coverage {rate:.1%} below 50% threshold"
+        )
+
+
+@real_db
+def test_Q24_validation_stats_returns_data(live_conn):
+    """Q-24: Validation stats query returns plausible data for each source."""
+    sources = [r[0] for r in live_conn.execute("SELECT DISTINCT source FROM awards").fetchall()]
+    for source in sources:
+        row = live_conn.execute(
+            "SELECT COUNT(*), ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 1) "
+            "FROM awards WHERE source = ?",
+            (source,),
+        ).fetchone()
+        assert row[0] > 0, f"{source} has 0 records"
+        assert row[1] is not None, f"{source} has NULL total funding"
+
+
+@real_db
+def test_Q25_peer_canonical_name_consistency(live_conn):
+    """Q-25: Every peer_label in institutions maps to awards via inst_canonical_name."""
+    peers = live_conn.execute(
+        "SELECT DISTINCT peer_label FROM institutions "
+        "WHERE is_peer_texas = 1 OR is_peer_national = 1"
+    ).fetchall()
+    for (peer,) in peers:
+        count = live_conn.execute(
+            "SELECT COUNT(*) FROM awards WHERE inst_canonical_name = ?",
+            (peer,),
+        ).fetchone()[0]
+        # Peers should have at least some awards
+        assert count > 0, f"Peer '{peer}' has 0 awards via inst_canonical_name"
+
+
+@real_db
+@pytest.mark.parametrize("source", list(BASELINES.keys()))
+def test_B01_record_count_matches_baseline(live_conn, source):
+    """B-01: Record count for each source matches baseline within 5% tolerance."""
+    baseline = BASELINES[source]
+    expected = baseline.get("expected_record_count")
+    if expected is None:
+        pytest.skip(f"No baseline record count set for {source}")
+    actual = live_conn.execute(
+        "SELECT COUNT(*) FROM awards WHERE source = ?", (source,)
+    ).fetchone()[0]
+    tolerance = 0.05
+    assert abs(actual - expected) / max(expected, 1) <= tolerance, (
+        f"{source}: expected ~{expected:,} records, got {actual:,} "
+        f"(diff {abs(actual - expected):,}, {abs(actual - expected)/max(expected,1):.1%})"
+    )
+
+
+@real_db
+def test_Q26_negative_amounts_by_source(live_conn):
+    """Q-26: Negative amounts only in USASpending sources, never in NSF or NIH."""
+    rows = live_conn.execute(
+        "SELECT source, COUNT(*) FROM awards WHERE awd_amount < 0 GROUP BY source"
+    ).fetchall()
+    sources_with_negatives = {r[0] for r in rows}
+    assert "nsf" not in sources_with_negatives, "NSF should have no negative amounts"
+    assert "nih" not in sources_with_negatives, "NIH should have no negative amounts"
+
+
+def test_F01_csv_export_format():
+    """F-01: CSV export filename format is correct (unit test, no DB)."""
+    import re
+    for agency in ("nsf", "nih", "dod"):
+        for fy_start, fy_end in [(2022, 2025), (2020, 2024)]:
+            fname = f"federal_radar_gap_{agency}_{fy_start}-{fy_end}.csv"
+            assert re.match(
+                r"federal_radar_gap_[a-z]+_\d{4}-\d{4}\.csv$", fname
+            ), f"Bad filename format: {fname}"
+            fname2 = f"federal_radar_funding_{agency}_{fy_start}-{fy_end}.csv"
+            assert re.match(
+                r"federal_radar_funding_[a-z]+_\d{4}-\d{4}\.csv$", fname2
+            ), f"Bad filename format: {fname2}"

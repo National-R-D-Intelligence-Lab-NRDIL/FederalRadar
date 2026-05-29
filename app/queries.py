@@ -87,6 +87,14 @@ PEER_SHORT = {
 }
 
 
+# ED (Dept of Education) CFDA codes that are non-research (student aid, CARES, etc.)
+ED_NON_RESEARCH_CFDAS = (
+    "84.425", "84.041", "84.042", "84.044", "84.047",
+    "84.031", "84.007", "84.033", "84.063", "84.268",
+    "84.002", "84.004", "84.379",
+)
+
+
 def _conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA cache_size = -65536;")
@@ -187,6 +195,21 @@ def get_nih_activity_codes(institute: str | None = None) -> list[str]:
                    ORDER BY activity_code"""
             ).fetchall()
     return [r[0] for r in rows]
+
+
+@st.cache_data(ttl=3600)
+def get_cfda_programs(agency: str) -> list[tuple[str, str]]:
+    """Returns (opportunity_number, cfda_title) for a USASpending agency."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT opportunity_number,
+                      COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)
+               FROM awards
+               WHERE source = ? AND opportunity_number IS NOT NULL
+               ORDER BY opportunity_number""",
+            (agency,),
+        ).fetchall()
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +560,8 @@ def get_field_wide_stats(
     dir_filter: str | None = None,
     subdiv_filter: str | None = None,
     institute_filter: str | None = None,
+    cfda_filter: str | None = None,
+    ed_exclude_cfdas: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """
     Field-wide totals per program (ALL institutions, not just peers).
@@ -564,6 +589,7 @@ def get_field_wide_stats(
         "fiscal_year BETWEEN ? AND ?",
         f"{prog_col} IS NOT NULL",
         f"TRIM({prog_col}) != ''",
+        "awd_amount > 0",
     ]
     params: list = [agency, fy_start, fy_end]
 
@@ -577,6 +603,14 @@ def get_field_wide_stats(
     elif agency == "nih" and institute_filter:
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
+
+    if cfda_filter:
+        clauses.append("opportunity_number = ?")
+        params.append(cfda_filter)
+    if ed_exclude_cfdas:
+        placeholders_ed = ",".join("?" * len(ed_exclude_cfdas))
+        clauses.append(f"opportunity_number NOT IN ({placeholders_ed})")
+        params.extend(ed_exclude_cfdas)
 
     sql = f"""
         SELECT {prog_col} AS program_abbr,
@@ -602,6 +636,8 @@ def get_heatmap_data(
     dir_filter: str | None = None,
     subdiv_filter: str | None = None,
     institute_filter: str | None = None,
+    cfda_filter: str | None = None,
+    ed_exclude_cfdas: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """
     Program × fiscal_year matrix for the heatmap.
@@ -629,6 +665,7 @@ def get_heatmap_data(
         "fiscal_year BETWEEN ? AND ?",
         f"{prog_col} IS NOT NULL",
         f"TRIM({prog_col}) != ''",
+        "awd_amount > 0",
     ]
     params: list = [agency, fy_start, fy_end]
 
@@ -642,6 +679,14 @@ def get_heatmap_data(
     elif agency == "nih" and institute_filter:
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
+
+    if cfda_filter:
+        clauses.append("opportunity_number = ?")
+        params.append(cfda_filter)
+    if ed_exclude_cfdas:
+        placeholders_ed = ",".join("?" * len(ed_exclude_cfdas))
+        clauses.append(f"opportunity_number NOT IN ({placeholders_ed})")
+        params.extend(ed_exclude_cfdas)
 
     uei_ph = ",".join("?" * len(my_ueis)) if my_ueis else "NULL"
     # UEI placeholders appear in SELECT (before WHERE), so UEI params must come first
@@ -673,6 +718,8 @@ def get_raw_comparison(
     dir_filter: str | None = None,
     subdiv_filter: str | None = None,
     institute_filter: str | None = None,
+    cfda_filter: str | None = None,
+    ed_exclude_cfdas: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """
     Long-form DataFrame: program | institution | awards | funding_m
@@ -704,6 +751,7 @@ def get_raw_comparison(
         f"inst_uei IN ({placeholders})",
         f"{prog_col} IS NOT NULL",
         f"TRIM({prog_col}) != ''",
+        "awd_amount > 0",
     ]
     params: list = [agency, fy_start, fy_end] + list(all_ueis)
 
@@ -725,6 +773,14 @@ def get_raw_comparison(
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
 
+    if cfda_filter:
+        clauses.append("opportunity_number = ?")
+        params.append(cfda_filter)
+    if ed_exclude_cfdas:
+        placeholders_ed = ",".join("?" * len(ed_exclude_cfdas))
+        clauses.append(f"opportunity_number NOT IN ({placeholders_ed})")
+        params.extend(ed_exclude_cfdas)
+
     sql = f"""
         SELECT {prog_col} AS program_abbr,
                {name_expr} AS program,
@@ -738,3 +794,68 @@ def get_raw_comparison(
     """
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)
+
+
+# ---------------------------------------------------------------------------
+# PI drill-down + validation stats
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_pis_for_program(
+    institution: str,
+    agency: str,
+    prog_col: str,
+    program_abbr: str,
+    fy_start: int,
+    fy_end: int,
+) -> pd.DataFrame:
+    """PIs at a given institution who won awards in a specific program."""
+    sql = f"""
+        SELECT pi_name AS PI,
+               COUNT(*) AS Awards,
+               COALESCE(SUM(awd_amount), 0) AS [Total Funding],
+               MIN(fiscal_year) AS [First FY],
+               MAX(fiscal_year) AS [Last FY]
+        FROM awards
+        WHERE source = ?
+          AND {prog_col} = ?
+          AND inst_canonical_name = ?
+          AND fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+          AND pi_name IS NOT NULL AND pi_name != ''
+        GROUP BY pi_name
+        ORDER BY [Total Funding] DESC
+    """
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            sql, conn, params=(agency, program_abbr, institution, fy_start, fy_end)
+        )
+    df.index = range(1, len(df) + 1)
+    # Keep FY columns as plain integers (not formatted as 2,024)
+    for col in ("First FY", "Last FY"):
+        if col in df.columns:
+            df[col] = df[col].astype(int)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
+    """Summary stats for the validation footer."""
+    with _conn() as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) AS total_records,
+                      ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 1) AS total_funding_m,
+                      MAX(updated_at) AS last_updated,
+                      SUM(CASE WHEN awd_amount < 0 THEN 1 ELSE 0 END) AS negative_excluded,
+                      SUM(CASE WHEN awd_amount = 0 THEN 1 ELSE 0 END) AS zero_count
+               FROM awards
+               WHERE source = ? AND fiscal_year BETWEEN ? AND ?""",
+            (agency, fy_start, fy_end),
+        ).fetchone()
+    return {
+        "total_records": row[0],
+        "total_funding_m": row[1],
+        "last_updated": row[2],
+        "negative_excluded": row[3],
+        "zero_count": row[4],
+    }

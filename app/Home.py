@@ -12,10 +12,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from queries import (
+    ED_NON_RESEARCH_CFDAS,
     MY_INSTITUTION,
     NSF_DIR_NAMES,
     NSF_DIV_NAMES,
     PEER_SHORT,
+    get_agencies,
     get_field_wide_stats,
     get_fy_bounds,
     get_heatmap_data,
@@ -24,7 +26,9 @@ from queries import (
     get_nsf_directorates,
     get_nsf_subdiv,
     get_peer_institutions,
+    get_pis_for_program,
     get_raw_comparison,
+    get_validation_stats,
 )
 
 st.set_page_config(
@@ -42,13 +46,16 @@ with st.sidebar:
     st.caption(MY_INSTITUTION)
     st.divider()
 
+    all_agencies = get_agencies()
     agency = st.selectbox(
         "Agency",
-        ["nsf", "nih", "dod", "doe", "nasa", "usda", "ed", "commerce"],
+        all_agencies,
         format_func=str.upper,
     )
 
     dir_filter = subdiv_filter = institute_filter = None
+    cfda_filter = None
+    ed_exclude_cfdas: tuple[str, ...] = ()
 
     if agency == "nsf":
         dirs = get_nsf_directorates()
@@ -73,6 +80,11 @@ with st.sidebar:
         choice = st.selectbox("Institute", ["(All)"] + insts)
         institute_filter = choice if choice != "(All)" else None
 
+    else:
+        if agency == "ed":
+            if st.checkbox("Exclude non-research (student aid, CARES)", value=False):
+                ed_exclude_cfdas = ED_NON_RESEARCH_CFDAS
+
     st.divider()
 
     peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
@@ -88,7 +100,8 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption(f"Data: NSF, NIH, DOD, DOE, NASA, USDA, ED · FY{fy_min}-{fy_max}")
+    _agencies_str = ", ".join(a.upper() for a in all_agencies)
+    st.caption(f"Data: {_agencies_str} · FY{fy_min}-{fy_max}")
 
 # ---------------------------------------------------------------------------
 # Load data
@@ -101,10 +114,12 @@ peer_ueis  = tuple(uei for _, uei in peer_items)
 df_raw = get_raw_comparison(
     my_ueis, peer_ueis, agency, fy_start, fy_end,
     dir_filter, subdiv_filter, institute_filter,
+    cfda_filter, ed_exclude_cfdas,
 )
 df_field = get_field_wide_stats(
     agency, fy_start, fy_end,
     dir_filter, subdiv_filter, institute_filter,
+    cfda_filter, ed_exclude_cfdas,
 )
 
 # ---------------------------------------------------------------------------
@@ -118,6 +133,8 @@ if subdiv_filter:
     scope_parts.append(subdiv_filter)
 if institute_filter:
     scope_parts.append(institute_filter)
+if cfda_filter:
+    scope_parts.append(cfda_filter)
 scope_label = " / ".join(scope_parts)
 
 st.markdown(f"# {scope_label}")
@@ -378,6 +395,76 @@ styled = display.style.apply(_color_unt).apply(_color_trend).format({
 
 st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
 
+# CSV export for gap table
+_gap_csv = display.to_csv()
+st.download_button(
+    "Download gap table (CSV)",
+    _gap_csv,
+    file_name=f"federal_radar_gap_{agency}_{fy_start}-{fy_end}.csv",
+    mime="text/csv",
+)
+
+# ---------------------------------------------------------------------------
+# PI Drill-Down
+# ---------------------------------------------------------------------------
+
+if agency in ("nsf", "nih"):
+    # Determine which DB column to use for program filtering
+    if agency == "nsf":
+        if subdiv_filter:
+            _prog_col = "pgm_ele_name"
+        elif dir_filter:
+            _prog_col = "div_abbr"
+        else:
+            _prog_col = "dir_abbr"
+    else:
+        _prog_col = "activity_code" if institute_filter else "nih_institute"
+
+    st.subheader("PI Drill-Down")
+    with st.expander("Select a program and institution to see PIs", expanded=True):
+        # First pick institution, then show only programs where that institution has awards
+        _all_insts = [MY_INSTITUTION] + [c for c in pivot_n.columns if c != MY_INSTITUTION]
+        _pi_inst_labels = {i: PEER_SHORT.get(i, i) for i in _all_insts}
+        _pi_inst_choice = st.selectbox(
+            "Institution", _all_insts,
+            format_func=lambda x: _pi_inst_labels.get(x, x),
+            key="pi_inst",
+        )
+
+        # Only show programs where the selected institution has > 0 awards
+        _programs_for_pi = [p for p in pivot_n.index if pivot_n.loc[p, _pi_inst_choice] > 0]
+        if not _programs_for_pi:
+            st.info(f"No programs with awards for {_pi_inst_labels.get(_pi_inst_choice, _pi_inst_choice)}.")
+            _pi_prog_abbr = None
+        else:
+            _display_progs = [abbr_to_name.get(p, p) for p in _programs_for_pi]
+            _pi_prog_choice = st.selectbox("Program", _display_progs, key="pi_prog")
+            _pi_prog_idx = _display_progs.index(_pi_prog_choice) if _pi_prog_choice in _display_progs else 0
+            _pi_prog_abbr = _programs_for_pi[_pi_prog_idx]
+
+            _pi_df = get_pis_for_program(
+                _pi_inst_choice, agency, _prog_col, _pi_prog_abbr, fy_start, fy_end
+            )
+            if _pi_df.empty:
+                st.info("No PI data found for this combination.")
+            else:
+                def _fmt_funding(v):
+                    if v >= 1e6:
+                        return f"${v / 1e6:.2f}M"
+                    if v >= 1e3:
+                        return f"${v / 1e3:.2f}K"
+                    return f"${v:,.0f}"
+
+                _pi_df["Total Funding"] = _pi_df["Total Funding"].map(_fmt_funding)
+                st.dataframe(
+                    _pi_df,
+                    use_container_width=True,
+                    column_config={
+                        "First FY": st.column_config.NumberColumn(format="%d"),
+                        "Last FY": st.column_config.NumberColumn(format="%d"),
+                    },
+                )
+
 # ---------------------------------------------------------------------------
 # Peer funding comparison bar chart
 # ---------------------------------------------------------------------------
@@ -414,6 +501,15 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
+# CSV export for funding comparison
+_fund_csv = bar_data[["Institution", "Funding ($M)"]].to_csv(index=False)
+st.download_button(
+    "Download funding comparison (CSV)",
+    _fund_csv,
+    file_name=f"federal_radar_funding_{agency}_{fy_start}-{fy_end}.csv",
+    mime="text/csv",
+)
+
 # ---------------------------------------------------------------------------
 # Program activity heatmap
 # ---------------------------------------------------------------------------
@@ -428,6 +524,7 @@ st.caption(
 df_heatmap = get_heatmap_data(
     my_ueis, agency, fy_start, fy_end,
     dir_filter, subdiv_filter, institute_filter,
+    cfda_filter, ed_exclude_cfdas,
 )
 
 if df_heatmap.empty:
@@ -569,3 +666,22 @@ else:
         font=dict(size=12),
     )
     st.plotly_chart(fig_sk, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Validation footer
+# ---------------------------------------------------------------------------
+
+st.divider()
+_vstats = get_validation_stats(agency, fy_start, fy_end)
+_warnings = []
+if _vstats["negative_excluded"] and _vstats["negative_excluded"] > 0:
+    _warnings.append(f"{_vstats['negative_excluded']:,} negative-amount records excluded from gap analysis")
+if _vstats["zero_count"] and _vstats["zero_count"] > 0:
+    _warnings.append(f"{_vstats['zero_count']:,} zero-amount records in dataset")
+
+st.caption(
+    f"**Data Quality** · {_vstats['total_records']:,} records · "
+    f"${_vstats['total_funding_m']:,.1f}M total funding · "
+    f"Last updated: {_vstats['last_updated'] or 'unknown'}"
+    + (f" · Warnings: {'; '.join(_warnings)}" if _warnings else "")
+)
