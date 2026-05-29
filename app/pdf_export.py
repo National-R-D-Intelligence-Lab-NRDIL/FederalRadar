@@ -5,6 +5,7 @@ Returns bytes — pass directly to st.download_button.
 """
 
 from datetime import date
+from io import BytesIO
 
 import pandas as pd
 from fpdf import FPDF
@@ -132,6 +133,7 @@ def generate_gap_report(
     gap_df: pd.DataFrame,
     peer_funding: pd.DataFrame,
     pi_df: pd.DataFrame | None = None,
+    charts: list[tuple[str, bytes]] | None = None,
 ) -> bytes:
     """
     gap_df     : display DataFrame from Home.py (index = Program name, columns include
@@ -301,6 +303,19 @@ def generate_gap_report(
             for text, w, align in cells:
                 pdf.cell(w, 6, text, border=1, align=align, fill=True)
             pdf.ln(6)
+
+    # ------------------------------------------------------------------
+    # Chart pages — one chart per page
+    # ------------------------------------------------------------------
+    if charts:
+        for chart_title, png_bytes in charts:
+            if not png_bytes:
+                continue
+            pdf.add_page()
+            _section_header(pdf, chart_title)
+            pdf.ln(2)
+            # Full-width image; height scales proportionally from PNG dimensions
+            pdf.image(BytesIO(png_bytes), x=10, w=190)
 
     return bytes(pdf.output())
 

@@ -9,9 +9,18 @@ and by how much? Sorted by funding opportunity.
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 
 from pdf_export import generate_gap_report
+
+
+def _to_png(fig, width: int = 1200, height: int = 700) -> bytes | None:
+    """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure."""
+    try:
+        return pio.to_image(fig, format="png", width=width, height=height, scale=1.5)
+    except Exception:
+        return None
 from queries import (
     ED_NON_RESEARCH_CFDAS,
     MY_INSTITUTION,
@@ -410,33 +419,7 @@ st.download_button(
     mime="text/csv",
 )
 
-# PDF export — full analysis report
-_pi_df_for_pdf = None
-if agency in ("nsf", "nih"):
-    _pi_df_for_pdf = get_institution_pis(MY_INSTITUTION, source=agency)
-
-_pdf_bytes = generate_gap_report(
-    scope_label  = scope_label,
-    fy_start     = fy_start,
-    fy_end       = fy_end,
-    peer_set     = peer_set,
-    unt_awards   = unt_total_awards,
-    unt_funding  = unt_total_funding,
-    unt_rank     = unt_rank,
-    n_ranked     = n_ranked,
-    n_gaps       = n_gaps,
-    headline     = _headline,
-    gap_df       = display,
-    peer_funding = totals,
-    pi_df        = _pi_df_for_pdf,
-)
-st.download_button(
-    "Export PDF Report",
-    _pdf_bytes,
-    file_name=f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}_{fy_start}-{fy_end}.pdf",
-    mime="application/pdf",
-    type="primary",
-)
+# PDF export button is at the bottom of the page after all charts are rendered
 
 # ---------------------------------------------------------------------------
 # PI Drill-Down
@@ -503,6 +486,13 @@ if agency in ("nsf", "nih"):
 # Peer funding comparison bar chart
 # ---------------------------------------------------------------------------
 
+# Chart capture variables — populated below, used for PDF export at page bottom
+_pdf_fig_bar: object = None
+_pdf_fig_hm:  object = None
+_pdf_fig_sk:  object = None
+_pdf_hm_h:    int    = 700
+_pdf_sk_h:    int    = 700
+
 st.divider()
 st.subheader("Total Funding by Institution")
 st.caption("Total dollars awarded across all programs in the current scope. UNT shown in red.")
@@ -534,6 +524,7 @@ fig.update_layout(
     yaxis={"categoryorder": "total ascending"},
 )
 st.plotly_chart(fig, use_container_width=True)
+_pdf_fig_bar = fig
 
 # CSV export for funding comparison
 _fund_csv = bar_data[["Institution", "Funding ($M)"]].to_csv(index=False)
@@ -622,6 +613,8 @@ else:
         yaxis=dict(title=""),
     )
     st.plotly_chart(fig_hm, use_container_width=True)
+    _pdf_fig_hm = fig_hm
+    _pdf_hm_h   = max(600, 32 * len(y_labels))
 
 # ---------------------------------------------------------------------------
 # Sankey: Programs → Institutions
@@ -700,6 +693,60 @@ else:
         font=dict(size=12),
     )
     st.plotly_chart(fig_sk, use_container_width=True)
+    _pdf_fig_sk = fig_sk
+    _pdf_sk_h   = max(600, 28 * n_prog + 200)
+
+# ---------------------------------------------------------------------------
+# PDF export — full page report with all charts
+# ---------------------------------------------------------------------------
+
+st.divider()
+
+_pi_df_for_pdf = None
+if agency in ("nsf", "nih"):
+    _pi_df_for_pdf = get_institution_pis(MY_INSTITUTION, source=agency)
+
+_charts: list[tuple[str, bytes]] = []
+if _pdf_fig_bar is not None:
+    _png = _to_png(_pdf_fig_bar, width=1200, height=max(400, 32 * len(bar_data)))
+    if _png:
+        _charts.append(("Total Funding by Institution", _png))
+if _pdf_fig_hm is not None:
+    _png = _to_png(_pdf_fig_hm, width=1200, height=_pdf_hm_h)
+    if _png:
+        _charts.append(("Program Activity Heatmap", _png))
+if _pdf_fig_sk is not None:
+    _png = _to_png(_pdf_fig_sk, width=1200, height=_pdf_sk_h)
+    if _png:
+        _charts.append(("Funding Flow: Programs to Institutions", _png))
+
+_pdf_bytes = generate_gap_report(
+    scope_label  = scope_label,
+    fy_start     = fy_start,
+    fy_end       = fy_end,
+    peer_set     = peer_set,
+    unt_awards   = unt_total_awards,
+    unt_funding  = unt_total_funding,
+    unt_rank     = unt_rank,
+    n_ranked     = n_ranked,
+    n_gaps       = n_gaps,
+    headline     = _headline,
+    gap_df       = display,
+    peer_funding = totals,
+    pi_df        = _pi_df_for_pdf,
+    charts       = _charts or None,
+)
+_pdf_fname = (
+    f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}"
+    f"_{fy_start}-{fy_end}.pdf"
+)
+st.download_button(
+    "Export PDF Report",
+    _pdf_bytes,
+    file_name=_pdf_fname,
+    mime="application/pdf",
+    type="primary",
+)
 
 # ---------------------------------------------------------------------------
 # Validation footer
