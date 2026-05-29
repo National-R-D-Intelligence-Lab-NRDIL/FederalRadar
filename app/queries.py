@@ -473,6 +473,8 @@ def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFra
                        source as Agency,
                        COUNT(*) as Awards,
                        ROUND(SUM(awd_amount) / 1e6, 2) as [Total ($M)],
+                       MIN(fiscal_year) as [First FY],
+                       MAX(fiscal_year) as [Last FY],
                        GROUP_CONCAT(DISTINCT dir_abbr) as Divisions
                 FROM awards
                 WHERE inst_canonical_name = ? {source_clause}
