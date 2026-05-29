@@ -1,6 +1,6 @@
 # Federal Radar — Technical Context & Decision Log
 
-**Last updated:** 2026-05-29
+**Last updated:** 2026-05-29 (evening)
 **Purpose:** Single source of truth for every significant technical decision made during
 development. Anyone picking up this project — new developer, stakeholder, or future self —
 should be able to read this and understand not just what we built, but why.
@@ -47,6 +47,7 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 | `app/pages/1_Portfolio_Risk.py` | Portfolio Risk — agency concentration, what-if, peer HHI |
 | `app/pages/2_Expiring_Awards.py` | Expiring Awards — funding cliff, expiring awards table |
 | `app/queries.py` | All DB queries with 1-hour cache; peer config constants |
+| `app/pdf_export.py` | PDF report generator (fpdf2 + kaleido) — tables, charts, PI breakdown |
 | `scripts/usaspending_api_fetcher.py` | USASpending bulk download + load (ED, DOT, NEH, DOD, etc.) |
 | `scripts/nih_api_fetcher.py` | NIH RePORTER API fetcher |
 | `scripts/nih_deduplicate.py` | NIH deduplication (one row per project, sum of annual budgets) |
@@ -64,6 +65,7 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 - [x] Streamlit competitive gap analysis dashboard (Home.py)
 - [x] Portfolio Risk page — agency concentration donut, what-if scenario, peer HHI table, agency trend
 - [x] Expiring Awards page — scorecard, quarterly funding cliff chart, awards table with CSV, agency breakdown
+- [x] PDF export — full-page report with tables + embedded bar chart, heatmap, Sankey (kaleido + fpdf2)
 - [x] Upsert logic: fiscal_year never overwritten, awd_amount takes MAX
 - [x] Crash-safe .done sentinel system for downloads
 - [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
@@ -591,7 +593,57 @@ this, column headers overflow the table width.
 
 ---
 
-## 14. What Was Dropped
+## 14. PDF Export (`app/pdf_export.py`) — Added 2026-05-29
+
+### Why
+
+The app is hosted locally and cannot be shared as a URL. VPR/AVP users need to send analysis to leadership (provost, board, deans) as a standalone document. The PDF export bridges that gap until the app is hosted online.
+
+### Implementation
+
+**Dependencies:**
+- `fpdf2>=2.8` — pure Python PDF layout engine, no system dependencies, latin-1 font safe
+- `kaleido>=0.2` — Plotly's PNG export engine; renders any Plotly figure to bytes
+
+**How it works:**
+1. `generate_gap_report()` in `pdf_export.py` accepts all pre-computed data from `Home.py`
+2. Tables (scorecard, gap breakdown, peer funding, PI list) are drawn with `fpdf2` cells
+3. Charts are passed as `(title, png_bytes)` tuples — each rendered via `kaleido` in `Home.py`
+4. Each chart gets its own page with a section header
+5. Returns `bytes` — passed directly to `st.download_button(mime="application/pdf")`
+
+**PDF contents (in order):**
+1. Title block: scope label, FY range, peer set, institution
+2. 4-metric scorecard
+3. Biggest gap headline sentence
+4. Program breakdown table — Opportunity colored red (gap) / green (leading)
+5. Peer funding comparison — UNT row highlighted yellow
+6. UNT PI breakdown (NSF and NIH scopes only)
+7. Bar chart page — Total Funding by Institution
+8. Heatmap page — Program Activity Over Time
+9. Sankey page — Funding Flow: Programs to Institutions
+
+**Filename convention:** `federal_radar_{SCOPE}_{FY_START}-{FY_END}.pdf`
+Example: `federal_radar_NSF_BIO_IOS_2022-2025.pdf`
+
+**Placement:** "Export PDF Report" (primary blue button) sits at the bottom of `Home.py` after all charts are rendered — ensures all three figures are available when the button is clicked.
+
+**Latin-1 safety:** Helvetica is the PDF core font and is latin-1 only. A `_safe()` function in `pdf_export.py` replaces em dashes, smart quotes, and other non-latin-1 characters before passing any string to fpdf2. Arrow trend indicators (↑↓→) are converted to "Growing" / "Declining" / "Flat".
+
+**Chart height scaling:**
+- Bar chart: `max(400, 32 × n_institutions)` px
+- Heatmap: `max(600, 32 × n_programs)` px — scales with number of program rows
+- Sankey: `max(600, 28 × n_programs + 200)` px
+
+**Graceful degradation:** Each `_to_png()` call in `Home.py` is wrapped in try/except. If kaleido fails for any chart, that chart is silently omitted from the PDF — tables are always included.
+
+### Usage
+
+Select any filter combination (agency, directorate, division, FY range, peer set), scroll to the bottom of the Home page, click **Export PDF Report**. The PDF reflects exactly the current filter state and whatever metric is selected in the heatmap/Sankey radio buttons.
+
+---
+
+## 15. What Was Dropped
 
 | Item | Reason |
 |---|---|
@@ -602,7 +654,7 @@ this, column headers overflow the table width.
 
 ---
 
-## 15. Performance Rules and Lessons
+## 16. Performance Rules and Lessons
 
 1. **Batch everything.** Never insert/update one record at a time. Use `executemany` with batches of 500–1000.
 2. **Indexes before bulk updates.** A `WHERE UPPER(inst_name) = UPPER(?)` on 156K rows without an index = 147s for 785 queries. With index = seconds.
@@ -613,7 +665,7 @@ this, column headers overflow the table width.
 
 ---
 
-## 16. Database Indexes
+## 17. Database Indexes
 
 All created idempotently via `init_db()` in `src/db.py`.
 
@@ -639,7 +691,7 @@ All created idempotently via `init_db()` in `src/db.py`.
 
 ---
 
-## 17. File Structure
+## 18. File Structure
 
 ```
 Federal Radar/
@@ -655,6 +707,7 @@ Federal Radar/
 │   ├── pages/
 │   │   ├── 1_Portfolio_Risk.py        Agency concentration, what-if, peer HHI
 │   │   └── 2_Expiring_Awards.py       Funding cliff, expiring awards table
+│   ├── pdf_export.py                  PDF report generator (fpdf2 + kaleido)
 │   └── queries.py                     All DB queries, peer config, constants
 ├── scripts/
 │   ├── nsf_etl.py                     NSF bulk ZIP loader
@@ -680,7 +733,7 @@ Federal Radar/
 
 ---
 
-## 18. What Is NOT in the DB (Known Gaps)
+## 19. What Is NOT in the DB (Known Gaps)
 
 | Gap | Reason | Plan |
 |---|---|---|

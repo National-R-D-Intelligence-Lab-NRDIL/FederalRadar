@@ -107,6 +107,8 @@ The app opens at `http://localhost:8501`.
 
 **Navigation:** Sidebar shows all 3 pages — Home, Portfolio Risk, Expiring Awards
 
+**PDF Export (Home page only):** "Export PDF Report" button at the bottom of the Home page generates a shareable PDF of the current analysis — includes all tables and embeds the bar chart, heatmap, and Sankey as full-page images. Useful for sending to leadership while the app is hosted locally.
+
 **Reading the table:**
 - **Opportunity ($M)** = how much more funding UNT would receive if it matched the peer average. Negative = UNT is already at or above peer average.
 - **UNT column color:** green = competitive/leading, orange = within reach (<75% of peer avg), red = significantly behind (<40%), dark red = zero awards
@@ -186,7 +188,7 @@ The app opens at `http://localhost:8501`.
 ### Prerequisites
 
 - Python 3.11
-- Dependencies: `pip install streamlit pandas plotly`
+- Dependencies: `pip install streamlit pandas plotly fpdf2 kaleido`
 - For data pipeline: no additional dependencies (standard library only for core ETL)
 
 ### Initialize the database
@@ -319,6 +321,7 @@ Federal Radar/
 │   ├── pages/
 │   │   ├── 1_Portfolio_Risk.py        Agency concentration, what-if, peer HHI
 │   │   └── 2_Expiring_Awards.py       Funding cliff, expiring awards table
+│   ├── pdf_export.py                  PDF report generator (fpdf2 + kaleido)
 │   └── queries.py                     DB queries, peer config, NSF name constants
 ├── data/
 │   ├── federal_awards.db              SQLite, WAL mode, ~2GB
