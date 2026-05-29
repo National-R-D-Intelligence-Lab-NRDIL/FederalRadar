@@ -128,13 +128,7 @@ st.caption(f"FY{fy_start}–{fy_end}  ·  {peer_set} peers")
 # ---------------------------------------------------------------------------
 
 if df_raw.empty:
-    if agency not in ("nsf", "nih"):
-        st.info(
-            f"Program-level gap analysis is available for NSF and NIH. "
-            f"Select one of those agencies to see the competitive breakdown."
-        )
-    else:
-        st.info("No award data found for this filter combination.")
+    st.info("No award data found for this filter combination.")
     st.stop()
 
 # ---------------------------------------------------------------------------

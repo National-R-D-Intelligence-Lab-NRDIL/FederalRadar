@@ -545,14 +545,19 @@ def get_field_wide_stats(
     if agency == "nsf":
         if subdiv_filter:
             prog_col = "pgm_ele_name"
+            name_expr = "pgm_ele_name"
         elif dir_filter:
             prog_col = "div_abbr"
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
         else:
             prog_col = "dir_abbr"
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
     elif agency == "nih":
         prog_col = "activity_code" if institute_filter else "nih_institute"
+        name_expr = prog_col
     else:
-        return pd.DataFrame()
+        prog_col  = "opportunity_number"
+        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
 
     clauses = [
         "source = ?",
@@ -604,15 +609,20 @@ def get_heatmap_data(
     """
     if agency == "nsf":
         if subdiv_filter:
-            prog_col = "pgm_ele_name"
+            prog_col  = "pgm_ele_name"
+            name_expr = "pgm_ele_name"
         elif dir_filter:
-            prog_col = "div_abbr"
+            prog_col  = "div_abbr"
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
         else:
-            prog_col = "dir_abbr"
+            prog_col  = "dir_abbr"
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
     elif agency == "nih":
-        prog_col = "activity_code" if institute_filter else "nih_institute"
+        prog_col  = "activity_code" if institute_filter else "nih_institute"
+        name_expr = prog_col
     else:
-        return pd.DataFrame()
+        prog_col  = "opportunity_number"
+        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
 
     clauses = [
         "source = ?",
@@ -632,13 +642,6 @@ def get_heatmap_data(
     elif agency == "nih" and institute_filter:
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
-
-    if agency == "nsf" and prog_col == "dir_abbr":
-        name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
-    elif agency == "nsf" and prog_col == "div_abbr":
-        name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
-    else:
-        name_expr = prog_col
 
     uei_ph = ",".join("?" * len(my_ueis)) if my_ueis else "NULL"
     # UEI placeholders appear in SELECT (before WHERE), so UEI params must come first
@@ -688,9 +691,11 @@ def get_raw_comparison(
         else:
             prog_col = "dir_abbr"
     elif agency == "nih":
-        prog_col = "activity_code" if institute_filter else "nih_institute"
+        prog_col  = "activity_code" if institute_filter else "nih_institute"
+        name_expr = prog_col
     else:
-        return pd.DataFrame()
+        prog_col  = "opportunity_number"
+        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
 
     placeholders = ",".join("?" * len(all_ueis))
     clauses = [
@@ -709,17 +714,16 @@ def get_raw_comparison(
         if subdiv_filter:
             clauses.append("div_abbr = ?")
             params.append(subdiv_filter)
+        # Include full name column where available
+        if prog_col == "dir_abbr":
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+        elif prog_col == "div_abbr":
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+        else:
+            name_expr = prog_col
     elif agency == "nih" and institute_filter:
         clauses.append("nih_institute = ?")
         params.append(institute_filter)
-
-    # Include full name column where available
-    if agency == "nsf" and prog_col == "dir_abbr":
-        name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
-    elif agency == "nsf" and prog_col == "div_abbr":
-        name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
-    else:
-        name_expr = prog_col  # pgm_ele_name and NIH fields already have full names
 
     sql = f"""
         SELECT {prog_col} AS program_abbr,
