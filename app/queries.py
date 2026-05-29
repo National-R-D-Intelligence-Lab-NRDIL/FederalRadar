@@ -461,6 +461,55 @@ def get_institution_trend(inst_name: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
+def get_scoped_pis(
+    inst_name: str,
+    agency: str,
+    fy_start: int,
+    fy_end: int,
+    dir_filter: str | None = None,
+    subdiv_filter: str | None = None,
+    institute_filter: str | None = None,
+) -> pd.DataFrame:
+    """PIs at an institution filtered to current agency/scope/FY selection."""
+    clauses = [
+        "inst_canonical_name = ?",
+        "source = ?",
+        "fiscal_year BETWEEN ? AND ?",
+        "awd_amount > 0",
+        "pi_name IS NOT NULL",
+        "pi_name != ''",
+    ]
+    params: list = [inst_name, agency, fy_start, fy_end]
+
+    if agency == "nsf":
+        if dir_filter:
+            clauses.append("dir_abbr = ?")
+            params.append(dir_filter)
+        if subdiv_filter:
+            clauses.append("div_abbr = ?")
+            params.append(subdiv_filter)
+    elif agency == "nih" and institute_filter:
+        clauses.append("nih_institute = ?")
+        params.append(institute_filter)
+
+    where = " AND ".join(clauses)
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            f"""SELECT pi_name AS PI,
+                       COUNT(*) AS Awards,
+                       ROUND(SUM(awd_amount) / 1e6, 2) AS [Total ($M)],
+                       MIN(fiscal_year) AS [First FY],
+                       MAX(fiscal_year) AS [Last FY]
+                FROM awards
+                WHERE {where}
+                GROUP BY pi_name
+                ORDER BY [Total ($M)] DESC""",
+            conn, params=params,
+        )
+    return df
+
+
+@st.cache_data(ttl=3600)
 def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFrame:
     params = [inst_name]
     source_clause = ""
@@ -793,6 +842,93 @@ def get_raw_comparison(
         WHERE {" AND ".join(clauses)}
           AND inst_canonical_name IS NOT NULL
         GROUP BY {prog_col}, inst_canonical_name
+    """
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_raw_comparison_by_fy(
+    my_ueis: tuple[str, ...],
+    peer_ueis: tuple[str, ...],
+    agency: str,
+    fy_start: int,
+    fy_end: int,
+    dir_filter: str | None = None,
+    subdiv_filter: str | None = None,
+    institute_filter: str | None = None,
+    cfda_filter: str | None = None,
+    ed_exclude_cfdas: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """
+    Like get_raw_comparison but grouped by program × institution × fiscal_year.
+    Returns: program_abbr | program | institution | fiscal_year | awards | funding_m
+    """
+    all_ueis = my_ueis + peer_ueis
+    if not all_ueis:
+        return pd.DataFrame()
+
+    if agency == "nsf":
+        if subdiv_filter:
+            prog_col = "pgm_ele_name"
+        elif dir_filter:
+            prog_col = "div_abbr"
+        else:
+            prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "activity_code" if institute_filter else "nih_institute"
+        name_expr = prog_col
+    else:
+        prog_col = "opportunity_number"
+        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
+
+    placeholders = ",".join("?" * len(all_ueis))
+    clauses = [
+        "source = ?",
+        "fiscal_year BETWEEN ? AND ?",
+        f"inst_uei IN ({placeholders})",
+        f"{prog_col} IS NOT NULL",
+        f"TRIM({prog_col}) != ''",
+        "awd_amount > 0",
+    ]
+    params: list = [agency, fy_start, fy_end] + list(all_ueis)
+
+    if agency == "nsf":
+        if dir_filter:
+            clauses.append("dir_abbr = ?")
+            params.append(dir_filter)
+        if subdiv_filter:
+            clauses.append("div_abbr = ?")
+            params.append(subdiv_filter)
+        if prog_col == "dir_abbr":
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+        elif prog_col == "div_abbr":
+            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+        else:
+            name_expr = prog_col
+    elif agency == "nih" and institute_filter:
+        clauses.append("nih_institute = ?")
+        params.append(institute_filter)
+
+    if cfda_filter:
+        clauses.append("opportunity_number = ?")
+        params.append(cfda_filter)
+    if ed_exclude_cfdas:
+        placeholders_ed = ",".join("?" * len(ed_exclude_cfdas))
+        clauses.append(f"opportunity_number NOT IN ({placeholders_ed})")
+        params.extend(ed_exclude_cfdas)
+
+    sql = f"""
+        SELECT {prog_col} AS program_abbr,
+               {name_expr} AS program,
+               inst_canonical_name AS institution,
+               fiscal_year,
+               COUNT(*) AS awards,
+               ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 3) AS funding_m
+        FROM awards
+        WHERE {" AND ".join(clauses)}
+          AND inst_canonical_name IS NOT NULL
+        GROUP BY {prog_col}, inst_canonical_name, fiscal_year
     """
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)

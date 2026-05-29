@@ -15,10 +15,18 @@ import streamlit as st
 from pdf_export import generate_gap_report
 
 
-def _to_png(fig, width: int = 1200, height: int = 700) -> bytes | None:
-    """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure."""
+def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
+    """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure.
+    Clones the figure and widens margins so labels are not clipped in the
+    fixed-width kaleido render (automargin doesn't work reliably there)."""
+    import copy
     try:
-        return pio.to_image(fig, format="png", width=width, height=height, scale=1.5)
+        fig_copy = copy.deepcopy(fig)
+        cur_margin = fig_copy.layout.margin or {}
+        cur_l = getattr(cur_margin, "l", None) or 10
+        cur_b = getattr(cur_margin, "b", None) or 10
+        fig_copy.update_layout(margin=dict(l=max(cur_l, 180), b=max(cur_b, 60)))
+        return pio.to_image(fig_copy, format="png", width=width, height=height, scale=1)
     except Exception:
         return None
 from queries import (
@@ -31,7 +39,7 @@ from queries import (
     get_field_wide_stats,
     get_fy_bounds,
     get_heatmap_data,
-    get_institution_pis,
+    get_scoped_pis,
     get_my_ueis,
     get_nih_institutes,
     get_nsf_directorates,
@@ -39,6 +47,7 @@ from queries import (
     get_peer_institutions,
     get_pis_for_program,
     get_raw_comparison,
+    get_raw_comparison_by_fy,
     get_validation_stats,
 )
 
@@ -619,15 +628,15 @@ else:
     _pdf_hm_h   = max(600, 32 * len(y_labels))
 
 # ---------------------------------------------------------------------------
-# Sankey: Programs → Institutions
+# Sankey: Programs → Fiscal Year → Institutions
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.subheader("Funding Flow: Programs to Institutions")
+st.subheader("Funding Flow: Programs → Fiscal Year → Institutions")
 st.caption(
-    "How awards flow from programs to UNT and peers in the selected scope. "
+    "How awards flow from programs through fiscal years to UNT and peers. "
     "Band width is proportional to the selected metric. "
-    "UNT in red · peers in blue."
+    "UNT in red · peers in blue · fiscal years in green."
 )
 
 if df_raw.empty or not peer_cols:
@@ -638,117 +647,176 @@ else:
     )
     val_col = "awards" if sk_metric == "Award Count" else "funding_m"
 
-    # Programs sorted by total peer+UNT activity descending
-    prog_totals = df_raw.groupby("program_abbr")[val_col].sum()
-    programs_sk = prog_totals.sort_values(ascending=False).index.tolist()
-    n_prog = len(programs_sk)
+    # Fetch FY-level data for the Sankey
+    df_sk = get_raw_comparison_by_fy(
+        my_ueis, peer_ueis, agency, fy_start, fy_end,
+        dir_filter, subdiv_filter, institute_filter,
+        cfda_filter, ed_exclude_cfdas,
+    )
 
-    inst_nodes  = [MY_INSTITUTION] + peer_cols
-    prog_labels = [_clean_name(abbr_to_name.get(p, p))[:40] for p in programs_sk]
-    inst_labels = [
-        "UNT" if i == MY_INSTITUTION else PEER_SHORT.get(i, i)
-        for i in inst_nodes
-    ]
-    all_labels  = prog_labels + inst_labels
+    if df_sk.empty:
+        st.info("No data available for Sankey in this filter combination.")
+    else:
+        # Programs sorted by total activity descending
+        prog_totals = df_sk.groupby("program_abbr")[val_col].sum()
+        programs_sk = prog_totals.sort_values(ascending=False).index.tolist()
+        n_prog = len(programs_sk)
 
-    prog_colors = ["rgba(142, 68, 173, 0.75)"] * n_prog
-    inst_colors = [
-        "#e74c3c" if i == MY_INSTITUTION else "#2980b9"
-        for i in inst_nodes
-    ]
-    node_colors = prog_colors + inst_colors
+        # FY nodes — only years with actual data, sorted
+        fy_list = sorted(df_sk["fiscal_year"].unique().tolist())
+        n_fy = len(fy_list)
 
-    sources, targets, values, link_colors = [], [], [], []
+        inst_nodes = [MY_INSTITUTION] + peer_cols
+        n_inst = len(inst_nodes)
 
-    for pi, prog in enumerate(programs_sk):
-        prog_rows = df_raw[df_raw["program_abbr"] == prog]
+        # Node layout: [programs (0..n_prog-1)] [FYs (n_prog..n_prog+n_fy-1)] [insts (n_prog+n_fy..)]
+        prog_labels = [_clean_name(abbr_to_name.get(p, p))[:40] for p in programs_sk]
+        fy_labels = [f"FY{fy}" for fy in fy_list]
+        inst_labels = [
+            "UNT" if i == MY_INSTITUTION else PEER_SHORT.get(i, i)
+            for i in inst_nodes
+        ]
+        all_labels = prog_labels + fy_labels + inst_labels
 
-        for ii, inst in enumerate(inst_nodes):
-            row = prog_rows[prog_rows["institution"] == inst]
-            val = float(row[val_col].sum()) if not row.empty else 0.0
+        prog_colors = ["rgba(142, 68, 173, 0.75)"] * n_prog
+        fy_colors = ["rgba(39, 174, 96, 0.8)"] * n_fy
+        inst_colors = [
+            "#e74c3c" if i == MY_INSTITUTION else "#2980b9"
+            for i in inst_nodes
+        ]
+        node_colors = prog_colors + fy_colors + inst_colors
+
+        sources, targets, values, link_colors = [], [], [], []
+
+        # Build index lookups
+        fy_idx = {fy: n_prog + i for i, fy in enumerate(fy_list)}
+        inst_idx = {inst: n_prog + n_fy + i for i, inst in enumerate(inst_nodes)}
+
+        # Aggregate: Program → FY links
+        prog_fy = df_sk.groupby(["program_abbr", "fiscal_year"])[val_col].sum().reset_index()
+        for _, row in prog_fy.iterrows():
+            prog = row["program_abbr"]
+            if prog not in programs_sk:
+                continue
+            val = float(row[val_col])
             if val > 0:
-                sources.append(pi)
-                targets.append(n_prog + ii)
+                sources.append(programs_sk.index(prog))
+                targets.append(fy_idx[row["fiscal_year"]])
+                values.append(val)
+                link_colors.append("rgba(142, 68, 173, 0.3)")
+
+        # Aggregate: FY → Institution links
+        fy_inst = df_sk.groupby(["fiscal_year", "institution"])[val_col].sum().reset_index()
+        for _, row in fy_inst.iterrows():
+            inst = row["institution"]
+            if inst not in inst_idx:
+                continue
+            val = float(row[val_col])
+            if val > 0:
+                sources.append(fy_idx[row["fiscal_year"]])
+                targets.append(inst_idx[inst])
                 values.append(val)
                 link_colors.append(
                     "rgba(231, 76, 60, 0.35)" if inst == MY_INSTITUTION
                     else "rgba(41, 128, 185, 0.25)"
                 )
 
-    fig_sk = go.Figure(go.Sankey(
-        node=dict(
-            pad=14,
-            thickness=20,
-            label=all_labels,
-            color=node_colors,
-        ),
-        link=dict(
-            source=sources,
-            target=targets,
-            value=values,
-            color=link_colors,
-        ),
-    ))
-    fig_sk.update_layout(
-        margin=dict(t=10, b=10, l=10, r=10),
-        height=max(500, 28 * n_prog + 200),
-        font=dict(size=12),
-    )
-    st.plotly_chart(fig_sk, use_container_width=True)
-    _pdf_fig_sk = fig_sk
-    _pdf_sk_h   = max(600, 28 * n_prog + 200)
+        fig_sk = go.Figure(go.Sankey(
+            node=dict(
+                pad=14,
+                thickness=20,
+                label=all_labels,
+                color=node_colors,
+            ),
+            link=dict(
+                source=sources,
+                target=targets,
+                value=values,
+                color=link_colors,
+            ),
+        ))
+        fig_sk.update_layout(
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=max(500, 28 * n_prog + 200),
+            font=dict(size=12),
+        )
+        st.plotly_chart(fig_sk, use_container_width=True)
+        _pdf_fig_sk = fig_sk
+        _pdf_sk_h   = max(600, 28 * n_prog + 200)
 
 # ---------------------------------------------------------------------------
-# PDF export — full page report with all charts
+# PDF export — lazy generation (only renders charts on click)
 # ---------------------------------------------------------------------------
 
 st.divider()
 
-_pi_df_for_pdf = None
-if agency in ("nsf", "nih"):
-    _pi_df_for_pdf = get_institution_pis(MY_INSTITUTION, source=agency)
-
-_charts: list[tuple[str, bytes]] = []
-if _pdf_fig_bar is not None:
-    _png = _to_png(_pdf_fig_bar, width=1200, height=max(400, 32 * len(bar_data)))
-    if _png:
-        _charts.append(("Total Funding by Institution", _png))
-if _pdf_fig_hm is not None:
-    _png = _to_png(_pdf_fig_hm, width=1200, height=_pdf_hm_h)
-    if _png:
-        _charts.append(("Program Activity Heatmap", _png))
-if _pdf_fig_sk is not None:
-    _png = _to_png(_pdf_fig_sk, width=1200, height=_pdf_sk_h)
-    if _png:
-        _charts.append(("Funding Flow: Programs to Institutions", _png))
-
-_pdf_bytes = generate_gap_report(
-    scope_label  = scope_label,
-    fy_start     = fy_start,
-    fy_end       = fy_end,
-    peer_set     = peer_set,
-    unt_awards   = unt_total_awards,
-    unt_funding  = unt_total_funding,
-    unt_rank     = unt_rank,
-    n_ranked     = n_ranked,
-    n_gaps       = n_gaps,
-    headline     = _headline,
-    gap_df       = display,
-    peer_funding = totals,
-    pi_df        = _pi_df_for_pdf,
-    charts       = _charts or None,
-)
 _pdf_fname = (
     f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}"
     f"_{fy_start}-{fy_end}.pdf"
 )
-st.download_button(
-    "Export PDF Report",
-    _pdf_bytes,
-    file_name=_pdf_fname,
-    mime="application/pdf",
-    type="primary",
-)
+
+_include_charts = st.checkbox("Include charts in PDF", value=False,
+                               help="Adds bar chart, heatmap, and Sankey. Takes ~10 sec extra.")
+
+
+def _build_pdf(with_charts: bool = False) -> bytes:
+    """Build the PDF report. Called only on button click."""
+    _pi_df = None
+    if agency in ("nsf", "nih"):
+        _pi_df = get_scoped_pis(
+            MY_INSTITUTION, agency, fy_start, fy_end,
+            dir_filter, subdiv_filter, institute_filter,
+        )
+        if _pi_df is not None and not _pi_df.empty:
+            _pi_df = _pi_df.copy()
+            _pi_df.insert(1, "Scope", scope_label)
+
+    _charts: list[tuple[str, bytes]] | None = None
+    if with_charts:
+        _charts = []
+        if _pdf_fig_bar is not None:
+            _png = _to_png(_pdf_fig_bar, height=min(900, max(400, 28 * len(bar_data))))
+            if _png:
+                _charts.append(("Total Funding by Institution", _png))
+        if _pdf_fig_hm is not None:
+            _png = _to_png(_pdf_fig_hm, height=min(900, _pdf_hm_h))
+            if _png:
+                _charts.append(("Program Activity Heatmap", _png))
+        if _pdf_fig_sk is not None:
+            _png = _to_png(_pdf_fig_sk, height=min(900, _pdf_sk_h))
+            if _png:
+                _charts.append(("Funding Flow: Programs to Institutions", _png))
+
+    return generate_gap_report(
+        scope_label  = scope_label,
+        fy_start     = fy_start,
+        fy_end       = fy_end,
+        peer_set     = peer_set,
+        unt_awards   = unt_total_awards,
+        unt_funding  = unt_total_funding,
+        unt_rank     = unt_rank,
+        n_ranked     = n_ranked,
+        n_gaps       = n_gaps,
+        headline     = _headline,
+        gap_df       = display,
+        peer_funding = totals,
+        pi_df        = _pi_df,
+        charts       = _charts or None,
+    )
+
+
+if st.button("Export PDF Report", type="primary"):
+    _label = "Rendering charts and building PDF..." if _include_charts else "Building PDF..."
+    with st.spinner(_label):
+        st.session_state["_pdf_bytes"] = _build_pdf(with_charts=_include_charts)
+
+if st.session_state.get("_pdf_bytes"):
+    st.download_button(
+        "Download PDF",
+        st.session_state["_pdf_bytes"],
+        file_name=_pdf_fname,
+        mime="application/pdf",
+    )
 
 # ---------------------------------------------------------------------------
 # Validation footer

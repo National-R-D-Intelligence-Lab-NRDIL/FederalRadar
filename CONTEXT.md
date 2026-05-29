@@ -742,3 +742,11 @@ Federal Radar/
 | Grant opportunities (solicitations) | Different data type entirely | Grants.gov API, Phase 2 |
 | Subaward data | Not in bulk download | Future |
 | Private foundation grants | Not in federal systems | Phase 3 |
+
+---
+
+## 20. Future Features
+
+| Feature | Current State | Target | Notes |
+|---|---|---|---|
+| High-quality PDF export | fpdf2 + kaleido (PNG raster, slow) | WeasyPrint + SVG vector charts | Eliminates headless Chromium dependency, vector = infinite zoom, faster render. HTML templating replaces cell-by-cell layout. Plotly `.to_image(format="svg")` for charts. |

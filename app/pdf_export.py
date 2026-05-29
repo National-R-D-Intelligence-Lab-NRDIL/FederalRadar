@@ -4,6 +4,7 @@ Generates a PDF report of the current gap analysis for sharing with stakeholders
 Returns bytes — pass directly to st.download_button.
 """
 
+import struct
 from datetime import date
 from io import BytesIO
 
@@ -55,6 +56,18 @@ def _safe(text: str) -> str:
     for ch, sub in _UNICODE_SUBS.items():
         text = text.replace(ch, sub)
     return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    """Extract (width, height) from PNG IHDR. Returns (0, 0) on failure."""
+    try:
+        if data[1:4] == b"PNG":
+            w = struct.unpack(">I", data[16:20])[0]
+            h = struct.unpack(">I", data[20:24])[0]
+            return w, h
+    except Exception:
+        pass
+    return 0, 0
 
 
 def _section_header(pdf: "RadarPDF", title: str) -> None:
@@ -275,8 +288,8 @@ def generate_gap_report(
     if pi_df is not None and not pi_df.empty:
         _section_header(pdf, "UNT Principal Investigators")
 
-        iw = [72, 18, 34, 20, 16, 16]
-        ih = ["PI", "Agency", "Total Funding", "Awards", "First FY", "Last FY"]
+        iw = [60, 35, 31, 18, 16, 16]  # total = 176
+        ih = ["PI", "Scope", "Total ($M)", "Awards", "First FY", "Last FY"]
         _table_header(pdf, ih, iw)
 
         for i, row in pi_df.head(25).iterrows():
@@ -292,13 +305,15 @@ def generate_gap_report(
             except (ValueError, TypeError):
                 funding_str = str(funding_raw)
 
+            scope_val = row.get("Scope", row.get("Agency", ""))
+
             cells = [
-                (_safe(str(row.get("PI", ""))[:40]),   iw[0], "L"),
-                (str(row.get("Agency", "")).upper(),   iw[1], "C"),
-                (funding_str,                          iw[2], "C"),
-                (str(row.get("Awards", "")),           iw[3], "C"),
-                (_fy_str(row.get("First FY")),         iw[4], "C"),
-                (_fy_str(row.get("Last FY")),          iw[5], "C"),
+                (_safe(str(row.get("PI", ""))[:38]),        iw[0], "L"),
+                (_safe(str(scope_val)),                      iw[1], "C"),
+                (funding_str,                                iw[2], "C"),
+                (str(row.get("Awards", "")),                 iw[3], "C"),
+                (_fy_str(row.get("First FY")),               iw[4], "C"),
+                (_fy_str(row.get("Last FY")),                iw[5], "C"),
             ]
             for text, w, align in cells:
                 pdf.cell(w, 6, text, border=1, align=align, fill=True)
@@ -307,6 +322,8 @@ def generate_gap_report(
     # ------------------------------------------------------------------
     # Chart pages — one chart per page
     # ------------------------------------------------------------------
+    _MAX_CHART_H = 235  # mm — leaves room for header + margins on one page
+
     if charts:
         for chart_title, png_bytes in charts:
             if not png_bytes:
@@ -314,8 +331,8 @@ def generate_gap_report(
             pdf.add_page()
             _section_header(pdf, chart_title)
             pdf.ln(2)
-            # Full-width image; height scales proportionally from PNG dimensions
-            pdf.image(BytesIO(png_bytes), x=10, w=190)
+            pdf.image(BytesIO(png_bytes), x=10, w=PAGE_W, h=_MAX_CHART_H,
+                      keep_aspect_ratio=True)
 
     return bytes(pdf.output())
 
