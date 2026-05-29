@@ -8,6 +8,7 @@ and by how much? Sorted by funding opportunity.
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from queries import (
@@ -17,6 +18,7 @@ from queries import (
     PEER_SHORT,
     get_field_wide_stats,
     get_fy_bounds,
+    get_heatmap_data,
     get_my_ueis,
     get_nih_institutes,
     get_nsf_directorates,
@@ -149,10 +151,24 @@ pivot_m = df_raw.pivot_table(
 )
 
 # Build abbr -> full name mapping from the data for display
+# Strip NSF structural prefixes (e.g. "Directorate for ", "Division of ")
+_NSF_PREFIXES = (
+    "Directorate for ", "Directorate, ", "Directorate - ",
+    "Division of ", "Division for ", "Division - ",
+    "Office of ", "Office for ",
+)
+
+def _clean_name(name: str) -> str:
+    for prefix in _NSF_PREFIXES:
+        if isinstance(name, str) and name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
 abbr_to_name = (
     df_raw[["program_abbr", "program"]]
     .drop_duplicates("program_abbr")
     .set_index("program_abbr")["program"]
+    .map(_clean_name)
     .to_dict()
 )
 
@@ -239,11 +255,10 @@ if not peer_cols:
     st.warning("No peer data found for the selected filters.")
     st.stop()
 
-# Pick top 7 peers by total awards across all programs (keep table readable)
+# All peers sorted by total awards — show everyone in the selected peer set
 top_peer_cols = (
     pivot_n[peer_cols].sum()
     .sort_values(ascending=False)
-    .head(7)
     .index.tolist()
 )
 
@@ -252,7 +267,13 @@ top_peer_cols = (
 field_lookup = {}
 if not df_field.empty:
     for _, r in df_field.iterrows():
-        field_lookup[r["program_abbr"]] = (int(r["field_awards"]), int(r["last_funded"]))
+        field_lookup[r["program_abbr"]] = (
+            int(r["field_awards"]),
+            int(r["last_funded"]),
+            int(r.get("awards_current", 0)),
+            int(r.get("awards_prev", 0)),
+            int(r.get("awards_two_ago", 0)),
+        )
 
 rows = []
 for prog in pivot_n.index:
@@ -262,15 +283,32 @@ for prog in pivot_n.index:
     unt_val  = int(pivot_n.loc[prog, MY_INSTITUTION])
     peer_avg = float(pivot_n.loc[prog, peer_cols].mean())
     gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, MY_INSTITUTION]), 2)
-    field_awards, last_funded = field_lookup.get(prog, (0, 0))
+    field_awards, last_funded, cur, prev, two_ago = field_lookup.get(prog, (0, 0, 0, 0, 0))
+
+    # Trend: compare prev year vs two years ago (prev is more complete than partial current year)
+    if prev == 0 and two_ago == 0:
+        trend = "—"
+    elif two_ago == 0:
+        trend = "↑"
+    elif prev == 0:
+        trend = "↓"
+    elif prev / two_ago >= 1.2:
+        trend = "↑"
+    elif prev / two_ago <= 0.8:
+        trend = "↓"
+    else:
+        trend = "→"
+
     row = {"Program": full_name, "UNT": unt_val}
     for col in top_peer_cols:
         short      = PEER_SHORT.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
-    row["Peer Avg"]        = round(peer_avg, 1)
+    row["Peer Avg"]         = round(peer_avg, 1)
     row["Opportunity ($M)"] = gap_m
-    row["Field Total"]     = field_awards
-    row["Last Funded"]     = last_funded if last_funded else "—"
+    row["Total Awards"]     = field_awards
+    row["Last Funded"]      = last_funded if last_funded else "—"
+    row["Trend"]            = trend
+    row[f"FY{fy_end}"]      = "✓" if cur > 0 else ""
     rows.append(row)
 
 display = (
@@ -287,12 +325,31 @@ st.caption(
     f"All programs sorted by opportunity size. "
     f"**Opportunity ($M)** = how much more UNT would receive if it matched the peer average "
     f"(negative = UNT is already at or above peer average). "
+    f"**Trend** = field-wide award count direction (↑ growing · → flat · ↓ declining) comparing "
+    f"FY{fy_end - 1} vs FY{fy_end - 2}. "
+    f"**FY{fy_end}** = ✓ if any institution received an award in this program in the current fiscal year. "
+    f"**Total Awards** = all awards made nationally in this program (not just peers) within the selected FY range. "
     f"UNT column: 🔴 trailing badly · 🟠 within reach · 🟢 competitive or leading."
 )
 
 if display.empty:
     st.info("No program data found for this filter combination.")
     st.stop()
+
+
+def _color_trend(col):
+    """Color the Trend column: green ↑, red ↓, gray → or —."""
+    if col.name != "Trend":
+        return [""] * len(col)
+    styles = []
+    for v in col:
+        if v == "↑":
+            styles.append("color: #27ae60; font-weight: bold")
+        elif v == "↓":
+            styles.append("color: #e74c3c; font-weight: bold")
+        else:
+            styles.append("color: #95a5a6")
+    return styles
 
 
 def _color_unt(col):
@@ -319,10 +376,10 @@ def _color_unt(col):
     return styles
 
 
-styled = display.style.apply(_color_unt).format({
+styled = display.style.apply(_color_unt).apply(_color_trend).format({
     "Peer Avg":         "{:.1f}",
     "Opportunity ($M)": "${:.2f}M",
-    "Field Total":      "{:,}",
+    "Total Awards":     "{:,}",
 })
 
 st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
@@ -362,3 +419,159 @@ fig.update_layout(
     yaxis={"categoryorder": "total ascending"},
 )
 st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Program activity heatmap
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Program Activity Over Time")
+st.caption(
+    "Field-wide award activity by program and fiscal year (all universities nationally). "
+    "Numbers in cells = UNT's award count. Blank = UNT had no awards that year."
+)
+
+df_heatmap = get_heatmap_data(
+    my_ueis, agency, fy_start, fy_end,
+    dir_filter, subdiv_filter, institute_filter,
+)
+
+if df_heatmap.empty:
+    st.info("Heatmap not available for this agency.")
+else:
+    hm_metric = st.radio("Color by", ["Award Count", "Funding ($M)"], horizontal=True)
+
+    # Clean program names (reuse _clean_name defined above)
+    df_heatmap["label"] = df_heatmap["program"].map(_clean_name)
+
+    # Deduplicate label per abbr (take most common from data)
+    abbr_label = (
+        df_heatmap[["program_abbr", "label"]]
+        .drop_duplicates("program_abbr")
+        .set_index("program_abbr")["label"]
+        .to_dict()
+    )
+
+    # Pivot to 2D matrices
+    value_col = "field_awards" if hm_metric == "Award Count" else "field_funding_m"
+    hm_z   = df_heatmap.pivot_table(index="program_abbr", columns="fiscal_year", values=value_col,   aggfunc="sum", fill_value=0)
+    hm_unt = df_heatmap.pivot_table(index="program_abbr", columns="fiscal_year", values="unt_awards", aggfunc="sum", fill_value=0)
+
+    # Sort rows by total field activity ascending so highest appears at top in Plotly
+    row_order = hm_z.sum(axis=1).sort_values(ascending=True).index
+    hm_z   = hm_z.loc[row_order]
+    hm_unt = hm_unt.loc[row_order]
+
+    y_labels = [abbr_label.get(p, p) for p in row_order]
+    x_labels = [str(int(y)) for y in hm_z.columns]
+
+    # Text annotations: UNT count if > 0, blank otherwise
+    text_vals = [
+        [str(int(hm_unt.iloc[r, c])) if hm_unt.iloc[r, c] > 0 else ""
+         for c in range(hm_unt.shape[1])]
+        for r in range(hm_unt.shape[0])
+    ]
+
+    colorbar_title = "Awards" if hm_metric == "Award Count" else "$M"
+
+    fig_hm = go.Figure(go.Heatmap(
+        z=hm_z.values,
+        x=x_labels,
+        y=y_labels,
+        text=text_vals,
+        texttemplate="%{text}",
+        textfont={"size": 11},
+        colorscale="Blues",
+        colorbar=dict(title=colorbar_title, thickness=14),
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "FY%{x}<br>"
+            f"{colorbar_title}: %{{z}}<br>"
+            "UNT: %{text}<extra></extra>"
+        ),
+    ))
+    fig_hm.update_layout(
+        margin=dict(t=30, b=10, l=0, r=0),
+        height=max(400, 26 * len(y_labels)),
+        xaxis=dict(side="top", title=""),
+        yaxis=dict(title=""),
+    )
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Sankey: Programs → Institutions
+# ---------------------------------------------------------------------------
+
+st.divider()
+st.subheader("Funding Flow: Programs to Institutions")
+st.caption(
+    "How awards flow from programs to UNT and peers in the selected scope. "
+    "Band width is proportional to the selected metric. "
+    "UNT in red · peers in blue."
+)
+
+if df_raw.empty or not peer_cols:
+    st.info("No data available for Sankey in this filter combination.")
+else:
+    sk_metric = st.radio(
+        "Flow size", ["Award Count", "Funding ($M)"], horizontal=True, key="sk_metric"
+    )
+    val_col = "awards" if sk_metric == "Award Count" else "funding_m"
+
+    # Programs sorted by total peer+UNT activity descending
+    prog_totals = df_raw.groupby("program_abbr")[val_col].sum()
+    programs_sk = prog_totals.sort_values(ascending=False).index.tolist()
+    n_prog = len(programs_sk)
+
+    inst_nodes  = [MY_INSTITUTION] + peer_cols
+    prog_labels = [_clean_name(abbr_to_name.get(p, p))[:40] for p in programs_sk]
+    inst_labels = [
+        "UNT" if i == MY_INSTITUTION else PEER_SHORT.get(i, i)
+        for i in inst_nodes
+    ]
+    all_labels  = prog_labels + inst_labels
+
+    prog_colors = ["rgba(142, 68, 173, 0.75)"] * n_prog
+    inst_colors = [
+        "#e74c3c" if i == MY_INSTITUTION else "#2980b9"
+        for i in inst_nodes
+    ]
+    node_colors = prog_colors + inst_colors
+
+    sources, targets, values, link_colors = [], [], [], []
+
+    for pi, prog in enumerate(programs_sk):
+        prog_rows = df_raw[df_raw["program_abbr"] == prog]
+
+        for ii, inst in enumerate(inst_nodes):
+            row = prog_rows[prog_rows["institution"] == inst]
+            val = float(row[val_col].sum()) if not row.empty else 0.0
+            if val > 0:
+                sources.append(pi)
+                targets.append(n_prog + ii)
+                values.append(val)
+                link_colors.append(
+                    "rgba(231, 76, 60, 0.35)" if inst == MY_INSTITUTION
+                    else "rgba(41, 128, 185, 0.25)"
+                )
+
+    fig_sk = go.Figure(go.Sankey(
+        node=dict(
+            pad=14,
+            thickness=20,
+            label=all_labels,
+            color=node_colors,
+        ),
+        link=dict(
+            source=sources,
+            target=targets,
+            value=values,
+            color=link_colors,
+        ),
+    ))
+    fig_sk.update_layout(
+        margin=dict(t=10, b=10, l=10, r=10),
+        height=max(500, 28 * n_prog + 200),
+        font=dict(size=12),
+    )
+    st.plotly_chart(fig_sk, use_container_width=True)

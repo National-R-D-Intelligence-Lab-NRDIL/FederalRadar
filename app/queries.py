@@ -576,13 +576,88 @@ def get_field_wide_stats(
     sql = f"""
         SELECT {prog_col} AS program_abbr,
                COUNT(*) AS field_awards,
-               MAX(fiscal_year) AS last_funded
+               MAX(fiscal_year) AS last_funded,
+               SUM(CASE WHEN fiscal_year = {fy_end}     THEN 1 ELSE 0 END) AS awards_current,
+               SUM(CASE WHEN fiscal_year = {fy_end - 1} THEN 1 ELSE 0 END) AS awards_prev,
+               SUM(CASE WHEN fiscal_year = {fy_end - 2} THEN 1 ELSE 0 END) AS awards_two_ago
         FROM awards
         WHERE {" AND ".join(clauses)}
         GROUP BY {prog_col}
     """
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_heatmap_data(
+    my_ueis: tuple[str, ...],
+    agency: str,
+    fy_start: int,
+    fy_end: int,
+    dir_filter: str | None = None,
+    subdiv_filter: str | None = None,
+    institute_filter: str | None = None,
+) -> pd.DataFrame:
+    """
+    Program × fiscal_year matrix for the heatmap.
+    Returns: program_abbr | program | fiscal_year | field_awards | field_funding_m | unt_awards
+    """
+    if agency == "nsf":
+        if subdiv_filter:
+            prog_col = "pgm_ele_name"
+        elif dir_filter:
+            prog_col = "div_abbr"
+        else:
+            prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "activity_code" if institute_filter else "nih_institute"
+    else:
+        return pd.DataFrame()
+
+    clauses = [
+        "source = ?",
+        "fiscal_year BETWEEN ? AND ?",
+        f"{prog_col} IS NOT NULL",
+        f"TRIM({prog_col}) != ''",
+    ]
+    params: list = [agency, fy_start, fy_end]
+
+    if agency == "nsf":
+        if dir_filter:
+            clauses.append("dir_abbr = ?")
+            params.append(dir_filter)
+        if subdiv_filter:
+            clauses.append("div_abbr = ?")
+            params.append(subdiv_filter)
+    elif agency == "nih" and institute_filter:
+        clauses.append("nih_institute = ?")
+        params.append(institute_filter)
+
+    if agency == "nsf" and prog_col == "dir_abbr":
+        name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+    elif agency == "nsf" and prog_col == "div_abbr":
+        name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+    else:
+        name_expr = prog_col
+
+    uei_ph = ",".join("?" * len(my_ueis)) if my_ueis else "NULL"
+    # UEI placeholders appear in SELECT (before WHERE), so UEI params must come first
+    params_full = list(my_ueis) + params
+
+    sql = f"""
+        SELECT {prog_col} AS program_abbr,
+               {name_expr} AS program,
+               fiscal_year,
+               COUNT(*) AS field_awards,
+               ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 2) AS field_funding_m,
+               SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN 1 ELSE 0 END) AS unt_awards
+        FROM awards
+        WHERE {" AND ".join(clauses)}
+        GROUP BY {prog_col}, fiscal_year
+        ORDER BY {prog_col}, fiscal_year
+    """
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params_full)
 
 
 @st.cache_data(ttl=3600)
