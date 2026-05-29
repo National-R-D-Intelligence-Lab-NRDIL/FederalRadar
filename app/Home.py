@@ -11,6 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from pdf_export import generate_gap_report
 from queries import (
     ED_NON_RESEARCH_CFDAS,
     MY_INSTITUTION,
@@ -21,6 +22,7 @@ from queries import (
     get_field_wide_stats,
     get_fy_bounds,
     get_heatmap_data,
+    get_institution_pis,
     get_my_ueis,
     get_nih_institutes,
     get_nsf_directorates,
@@ -231,6 +233,7 @@ st.divider()
 # Headline — one sentence, most important gap
 # ---------------------------------------------------------------------------
 
+_headline = ""
 if peer_cols:
     peer_avg_awards  = pivot_n[peer_cols].mean(axis=1)
     dollar_gap       = peer_avg_funding - pivot_m[MY_INSTITUTION]
@@ -248,13 +251,16 @@ if peer_cols:
         top_peer_name   = PEER_SHORT.get(top_peer_awards.index[0], top_peer_awards.index[0])
         top_peer_count  = int(top_peer_awards.iloc[0])
 
-        st.markdown(
+        _headline = (
             f"**Biggest gap: {top_prog_label}** — "
             f"In this program, UNT has **{unt_awards_top} awards**, "
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
             f"Closing this gap = **${gap_m_top:.1f}M** in funding."
         )
+        st.markdown(_headline)
+    else:
+        _headline = ""
 
 st.divider()
 
@@ -402,6 +408,34 @@ st.download_button(
     _gap_csv,
     file_name=f"federal_radar_gap_{agency}_{fy_start}-{fy_end}.csv",
     mime="text/csv",
+)
+
+# PDF export — full analysis report
+_pi_df_for_pdf = None
+if agency in ("nsf", "nih"):
+    _pi_df_for_pdf = get_institution_pis(MY_INSTITUTION, source=agency)
+
+_pdf_bytes = generate_gap_report(
+    scope_label  = scope_label,
+    fy_start     = fy_start,
+    fy_end       = fy_end,
+    peer_set     = peer_set,
+    unt_awards   = unt_total_awards,
+    unt_funding  = unt_total_funding,
+    unt_rank     = unt_rank,
+    n_ranked     = n_ranked,
+    n_gaps       = n_gaps,
+    headline     = _headline,
+    gap_df       = display,
+    peer_funding = totals,
+    pi_df        = _pi_df_for_pdf,
+)
+st.download_button(
+    "Export PDF Report",
+    _pdf_bytes,
+    file_name=f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}_{fy_start}-{fy_end}.pdf",
+    mime="application/pdf",
+    type="primary",
 )
 
 # ---------------------------------------------------------------------------
