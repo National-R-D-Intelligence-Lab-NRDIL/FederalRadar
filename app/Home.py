@@ -517,11 +517,12 @@ fig = px.bar(
     color="IsUNT",
     color_discrete_map={True: "#e74c3c", False: "#2980b9"},
 )
+_bar_label_w = max((len(str(lbl)) for lbl in bar_data["Label"]), default=10) * 7
 fig.update_layout(
     showlegend=False,
-    margin=dict(t=10, b=10, l=0, r=20),
+    margin=dict(t=10, b=10, l=_bar_label_w, r=20),
     height=max(300, 30 * len(bar_data)),
-    yaxis={"categoryorder": "total ascending"},
+    yaxis={"categoryorder": "total ascending", "automargin": True},
 )
 st.plotly_chart(fig, use_container_width=True)
 _pdf_fig_bar = fig
@@ -606,11 +607,12 @@ else:
             "UNT: %{text}<extra></extra>"
         ),
     ))
+    _hm_label_w = max((len(lbl) for lbl in y_labels), default=10) * 7
     fig_hm.update_layout(
-        margin=dict(t=30, b=10, l=0, r=0),
+        margin=dict(t=30, b=10, l=_hm_label_w, r=10),
         height=max(400, 26 * len(y_labels)),
         xaxis=dict(side="top", title=""),
-        yaxis=dict(title=""),
+        yaxis=dict(title="", automargin=True),
     )
     st.plotly_chart(fig_hm, use_container_width=True)
     _pdf_fig_hm = fig_hm
