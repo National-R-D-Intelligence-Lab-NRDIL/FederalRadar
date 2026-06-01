@@ -99,6 +99,7 @@ def _conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA cache_size = -65536;")
     conn.execute("PRAGMA temp_store = MEMORY;")
+    conn.execute("PRAGMA mmap_size = 268435456;")  # 256MB mmap
     return conn
 
 
@@ -481,31 +482,43 @@ def get_scoped_pis(
     ]
     params: list = [inst_name, agency, fy_start, fy_end]
 
-    if agency == "nsf":
+    if agency == "nih":
+        extra_select = "nih_institute, activity_code,"
+        extra_group = ", nih_institute, activity_code"
+        if institute_filter:
+            clauses.append("nih_institute = ?")
+            params.append(institute_filter)
+    elif agency == "nsf":
+        extra_select = "dir_abbr, div_abbr, pgm_ele_name,"
+        extra_group = ", dir_abbr, div_abbr, pgm_ele_name"
         if dir_filter:
             clauses.append("dir_abbr = ?")
             params.append(dir_filter)
         if subdiv_filter:
             clauses.append("div_abbr = ?")
             params.append(subdiv_filter)
-    elif agency == "nih" and institute_filter:
-        clauses.append("nih_institute = ?")
-        params.append(institute_filter)
+    else:
+        extra_select = ""
+        extra_group = ""
 
     where = " AND ".join(clauses)
     with _conn() as conn:
         df = pd.read_sql_query(
             f"""SELECT pi_name AS PI,
+                       {extra_select}
                        COUNT(*) AS Awards,
                        ROUND(SUM(awd_amount) / 1e6, 2) AS [Total ($M)],
                        MIN(fiscal_year) AS [First FY],
                        MAX(fiscal_year) AS [Last FY]
                 FROM awards
                 WHERE {where}
-                GROUP BY pi_name
+                GROUP BY pi_name{extra_group}
                 ORDER BY [Total ($M)] DESC""",
             conn, params=params,
         )
+    # Deduplicate to top-funded row per PI (primary program combination)
+    if not df.empty:
+        df = df.drop_duplicates(subset=["PI"], keep="first")
     return df
 
 
@@ -740,8 +753,8 @@ def get_heatmap_data(
         params.extend(ed_exclude_cfdas)
 
     uei_ph = ",".join("?" * len(my_ueis)) if my_ueis else "NULL"
-    # UEI placeholders appear in SELECT (before WHERE), so UEI params must come first
-    params_full = list(my_ueis) + params
+    # UEI placeholders appear twice in SELECT (unt_awards + unt_funding_m), so UEI params doubled
+    params_full = list(my_ueis) + list(my_ueis) + params
 
     sql = f"""
         SELECT {prog_col} AS program_abbr,
@@ -749,7 +762,8 @@ def get_heatmap_data(
                fiscal_year,
                COUNT(*) AS field_awards,
                ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 2) AS field_funding_m,
-               SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN 1 ELSE 0 END) AS unt_awards
+               SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN 1 ELSE 0 END) AS unt_awards,
+               ROUND(COALESCE(SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN awd_amount ELSE 0 END), 0) / 1e6, 2) AS unt_funding_m
         FROM awards
         WHERE {" AND ".join(clauses)}
         GROUP BY {prog_col}, fiscal_year

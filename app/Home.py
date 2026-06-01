@@ -6,6 +6,7 @@ Primary question: In [agency/program], where are peers beating us,
 and by how much? Sorted by funding opportunity.
 """
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -274,7 +275,8 @@ if peer_cols:
             f"In this program, UNT has **{unt_awards_top} awards**, "
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
-            f"Closing this gap = **${gap_m_top:.1f}M** in funding."
+            f"If UNT matched the peer average, it would represent "
+            f"an additional **${gap_m_top:.1f}M** in funding."
         )
         st.markdown(_headline)
     else:
@@ -526,12 +528,20 @@ fig = px.bar(
     color="IsUNT",
     color_discrete_map={True: "#e74c3c", False: "#2980b9"},
 )
+fig.update_traces(
+    text=bar_data["Funding ($M)"].map(lambda x: f"${x:.1f}M"),
+    textposition="outside",
+    textfont=dict(size=9),
+    cliponaxis=False,
+)
 _bar_label_w = max((len(str(lbl)) for lbl in bar_data["Label"]), default=10) * 7
+_bar_max = bar_data["Funding ($M)"].max() if not bar_data.empty else 1
 fig.update_layout(
     showlegend=False,
-    margin=dict(t=10, b=10, l=_bar_label_w, r=20),
+    margin=dict(t=10, b=10, l=_bar_label_w, r=80),
     height=max(300, 30 * len(bar_data)),
     yaxis={"categoryorder": "total ascending", "automargin": True},
+    xaxis=dict(range=[0, _bar_max * 1.18]),
 )
 st.plotly_chart(fig, use_container_width=True)
 _pdf_fig_bar = fig
@@ -600,6 +610,36 @@ else:
 
     colorbar_title = "Awards" if hm_metric == "Award Count" else "$M"
 
+    # Build UNT funding pivot for hover
+    hm_unt_funding = None
+    if "unt_funding_m" in df_heatmap.columns:
+        hm_unt_funding = df_heatmap.pivot_table(
+            index="program_abbr", columns="fiscal_year",
+            values="unt_funding_m", aggfunc="sum", fill_value=0,
+        ).reindex(index=row_order, columns=hm_z.columns, fill_value=0)
+
+    # Build customdata for hover: [raw_z, unt_funding_m]
+    z_raw = hm_z.values
+    if hm_unt_funding is not None:
+        customdata = np.stack([z_raw, hm_unt_funding.values], axis=-1)
+    else:
+        customdata = np.stack([z_raw, np.zeros_like(z_raw)], axis=-1)
+
+    if hm_metric == "Funding ($M)":
+        hover_tpl = (
+            "<b>%{y}</b><br>"
+            "FY%{x}<br>"
+            "Field: $%{customdata[0]:.1f}M<br>"
+            "UNT: $%{customdata[1]:.1f}M (awards: %{text})<extra></extra>"
+        )
+    else:
+        hover_tpl = (
+            "<b>%{y}</b><br>"
+            "FY%{x}<br>"
+            "Field Awards: %{customdata[0]:,.0f}<br>"
+            "UNT Awards: %{text}<extra></extra>"
+        )
+
     fig_hm = go.Figure(go.Heatmap(
         z=hm_z.values,
         x=x_labels,
@@ -609,18 +649,14 @@ else:
         textfont={"size": 11},
         colorscale="Blues",
         colorbar=dict(title=colorbar_title, thickness=14),
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "FY%{x}<br>"
-            f"{colorbar_title}: %{{z}}<br>"
-            "UNT: %{text}<extra></extra>"
-        ),
+        customdata=customdata,
+        hovertemplate=hover_tpl,
     ))
     _hm_label_w = max((len(lbl) for lbl in y_labels), default=10) * 7
     fig_hm.update_layout(
         margin=dict(t=30, b=10, l=_hm_label_w, r=10),
         height=max(400, 26 * len(y_labels)),
-        xaxis=dict(side="top", title=""),
+        xaxis=dict(side="top", title="", type="category"),
         yaxis=dict(title="", automargin=True),
     )
     st.plotly_chart(fig_hm, use_container_width=True)
@@ -657,6 +693,19 @@ else:
     if df_sk.empty:
         st.info("No data available for Sankey in this filter combination.")
     else:
+        def _fmt_dollars(m: float) -> str:
+            """Auto-format a value in millions: $1.2B, $435M, $12M, $0.4M."""
+            if m >= 1000:
+                b = m / 1000
+                return f"${b:,.1f}B" if b != int(b) else f"${int(b):,}B"
+            if m >= 10:
+                return f"${m:,.0f}M"
+            if m >= 1:
+                return f"${m:.1f}M" if m != int(m) else f"${int(m)}M"
+            if m > 0:
+                return f"${m:.1f}M"
+            return "$0M"
+
         # Programs sorted by total activity descending
         prog_totals = df_sk.groupby("program_abbr")[val_col].sum()
         programs_sk = prog_totals.sort_values(ascending=False).index.tolist()
@@ -669,13 +718,31 @@ else:
         inst_nodes = [MY_INSTITUTION] + peer_cols
         n_inst = len(inst_nodes)
 
+        # Compute node totals for labels
+        _prog_funding = df_sk.groupby("program_abbr")["funding_m"].sum()
+        _prog_awards = df_sk.groupby("program_abbr")["awards"].sum()
+        _fy_funding = df_sk.groupby("fiscal_year")["funding_m"].sum()
+        _fy_awards = df_sk.groupby("fiscal_year")["awards"].sum()
+        _inst_funding = df_sk.groupby("institution")["funding_m"].sum()
+        _inst_awards = df_sk.groupby("institution")["awards"].sum()
+
         # Node layout: [programs (0..n_prog-1)] [FYs (n_prog..n_prog+n_fy-1)] [insts (n_prog+n_fy..)]
-        prog_labels = [_clean_name(abbr_to_name.get(p, p))[:40] for p in programs_sk]
-        fy_labels = [f"FY{fy}" for fy in fy_list]
-        inst_labels = [
+        _prog_names = [_clean_name(abbr_to_name.get(p, p))[:35] for p in programs_sk]
+        _fy_names = [f"FY{fy}" for fy in fy_list]
+        _inst_names = [
             "UNT" if i == MY_INSTITUTION else PEER_SHORT.get(i, i)
             for i in inst_nodes
         ]
+
+        if sk_metric == "Funding ($M)":
+            prog_labels = [f"{n} ({_fmt_dollars(float(_prog_funding.get(p, 0)))})" for n, p in zip(_prog_names, programs_sk)]
+            fy_labels = [f"{n} ({_fmt_dollars(float(_fy_funding.get(fy, 0)))})" for n, fy in zip(_fy_names, fy_list)]
+            inst_labels = [f"{n} ({_fmt_dollars(float(_inst_funding.get(i, 0)))})" for n, i in zip(_inst_names, inst_nodes)]
+        else:
+            prog_labels = [f"{n} ({int(_prog_awards.get(p, 0)):,})" for n, p in zip(_prog_names, programs_sk)]
+            fy_labels = [f"{n} ({int(_fy_awards.get(fy, 0)):,})" for n, fy in zip(_fy_names, fy_list)]
+            inst_labels = [f"{n} ({int(_inst_awards.get(i, 0)):,})" for n, i in zip(_inst_names, inst_nodes)]
+
         all_labels = prog_labels + fy_labels + inst_labels
 
         prog_colors = ["rgba(142, 68, 173, 0.75)"] * n_prog
@@ -769,7 +836,19 @@ def _build_pdf(with_charts: bool = False) -> bytes:
         )
         if _pi_df is not None and not _pi_df.empty:
             _pi_df = _pi_df.copy()
-            _pi_df.insert(1, "Scope", scope_label)
+
+            def _pi_scope(row, _agency):
+                parts = [_agency.upper()]
+                for col in ["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"]:
+                    if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
+                        parts.append(str(row[col]).strip())
+                return " / ".join(parts)
+
+            _pi_df.insert(1, "Scope", _pi_df.apply(lambda r: _pi_scope(r, agency), axis=1))
+            _pi_df.drop(
+                columns=["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"],
+                errors="ignore", inplace=True,
+            )
 
     _charts: list[tuple[str, bytes]] | None = None
     if with_charts:
@@ -787,21 +866,34 @@ def _build_pdf(with_charts: bool = False) -> bytes:
             if _png:
                 _charts.append(("Funding Flow: Programs to Institutions", _png))
 
+    _df_fy = get_raw_comparison_by_fy(
+        my_ueis, peer_ueis, agency, fy_start, fy_end,
+        dir_filter, subdiv_filter, institute_filter,
+        cfda_filter, ed_exclude_cfdas,
+    )
+    fy_peer = (
+        _df_fy.groupby(["institution", "fiscal_year"])["funding_m"]
+        .sum()
+        .unstack(fill_value=0)
+        .reset_index()
+    ) if not _df_fy.empty else None
+
     return generate_gap_report(
-        scope_label  = scope_label,
-        fy_start     = fy_start,
-        fy_end       = fy_end,
-        peer_set     = peer_set,
-        unt_awards   = unt_total_awards,
-        unt_funding  = unt_total_funding,
-        unt_rank     = unt_rank,
-        n_ranked     = n_ranked,
-        n_gaps       = n_gaps,
-        headline     = _headline,
-        gap_df       = display,
-        peer_funding = totals,
-        pi_df        = _pi_df,
-        charts       = _charts or None,
+        scope_label     = scope_label,
+        fy_start        = fy_start,
+        fy_end          = fy_end,
+        peer_set        = peer_set,
+        unt_awards      = unt_total_awards,
+        unt_funding     = unt_total_funding,
+        unt_rank        = unt_rank,
+        n_ranked        = n_ranked,
+        n_gaps          = n_gaps,
+        headline        = _headline,
+        gap_df          = display,
+        peer_funding    = totals,
+        fy_peer_funding = fy_peer,
+        pi_df           = _pi_df,
+        charts          = _charts or None,
     )
 
 
