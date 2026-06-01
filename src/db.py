@@ -5,7 +5,9 @@ SQLite database setup and upsert for federal awards (NSF, NIH, and future agenci
 
 import json
 import os
+import shutil
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent / "data" / "federal_awards.db")))
@@ -43,6 +45,20 @@ CREATE TABLE IF NOT EXISTS awards (
 );
 """
 
+CREATE_REFRESH_LOG_SQL = """
+CREATE TABLE IF NOT EXISTS refresh_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source          TEXT NOT NULL,
+    started_at      DATETIME NOT NULL,
+    finished_at     DATETIME,
+    status          TEXT NOT NULL DEFAULT 'running',
+    records_fetched INTEGER DEFAULT 0,
+    records_upserted INTEGER DEFAULT 0,
+    error_message   TEXT,
+    details         TEXT
+);
+"""
+
 UPSERT_SQL = """
 INSERT INTO awards (
     awd_id, awd_titl_txt, inst_name, inst_state_code,
@@ -57,33 +73,32 @@ INSERT INTO awards (
     :agcy_id, :fiscal_year, :raw_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
     :source, :opportunity_number, :activity_code, :nih_institute, :direct_cost_amt
 ) ON CONFLICT(awd_id) DO UPDATE SET
-    awd_titl_txt            = excluded.awd_titl_txt,
-    inst_name               = excluded.inst_name,
-    inst_state_code         = excluded.inst_state_code,
+    -- COALESCE: never overwrite good data with NULL from a bad re-fetch
+    awd_titl_txt            = COALESCE(excluded.awd_titl_txt, awards.awd_titl_txt),
+    inst_name               = COALESCE(excluded.inst_name, awards.inst_name),
+    inst_state_code         = COALESCE(excluded.inst_state_code, awards.inst_state_code),
     -- Take the higher amount: total_obligated_amount only grows over time.
-    -- For NIH/NSF this is a no-op (single record per award).
     awd_amount              = CASE
                                 WHEN excluded.awd_amount > awards.awd_amount THEN excluded.awd_amount
                                 ELSE awards.awd_amount
                               END,
-    obligation_date         = excluded.obligation_date,
-    project_start_date      = excluded.project_start_date,
-    project_end_date        = excluded.project_end_date,
-    awd_abstract_narration  = excluded.awd_abstract_narration,
-    dir_abbr                = excluded.dir_abbr,
-    div_abbr                = excluded.div_abbr,
-    pgm_ele_name            = excluded.pgm_ele_name,
-    pi_name                 = excluded.pi_name,
-    agcy_id                 = excluded.agcy_id,
+    obligation_date         = COALESCE(excluded.obligation_date, awards.obligation_date),
+    project_start_date      = COALESCE(excluded.project_start_date, awards.project_start_date),
+    project_end_date        = COALESCE(excluded.project_end_date, awards.project_end_date),
+    awd_abstract_narration  = COALESCE(excluded.awd_abstract_narration, awards.awd_abstract_narration),
+    dir_abbr                = COALESCE(excluded.dir_abbr, awards.dir_abbr),
+    div_abbr                = COALESCE(excluded.div_abbr, awards.div_abbr),
+    pgm_ele_name            = COALESCE(excluded.pgm_ele_name, awards.pgm_ele_name),
+    pi_name                 = COALESCE(excluded.pi_name, awards.pi_name),
+    agcy_id                 = COALESCE(excluded.agcy_id, awards.agcy_id),
     -- Never overwrite fiscal_year: the first insert captures the original award year.
-    -- Later transactions (continuations, revisions) must not change when the grant was born.
     fiscal_year             = awards.fiscal_year,
-    raw_json                = excluded.raw_json,
-    source                  = excluded.source,
-    opportunity_number      = excluded.opportunity_number,
-    activity_code           = excluded.activity_code,
-    nih_institute           = excluded.nih_institute,
-    direct_cost_amt         = excluded.direct_cost_amt,
+    raw_json                = COALESCE(excluded.raw_json, awards.raw_json),
+    source                  = COALESCE(excluded.source, awards.source),
+    opportunity_number      = COALESCE(excluded.opportunity_number, awards.opportunity_number),
+    activity_code           = COALESCE(excluded.activity_code, awards.activity_code),
+    nih_institute           = COALESCE(excluded.nih_institute, awards.nih_institute),
+    direct_cost_amt         = COALESCE(excluded.direct_cost_amt, awards.direct_cost_amt),
     updated_at              = CURRENT_TIMESTAMP;
 """
 
@@ -115,6 +130,27 @@ CREATE_INDEXES_SQL = [
     # UEI-based institution identity indexes
     "CREATE INDEX IF NOT EXISTS idx_awards_inst_uei        ON awards(inst_uei);",
     "CREATE INDEX IF NOT EXISTS idx_awards_canonical_name  ON awards(inst_canonical_name);",
+    # ── UNIVERSAL (all agencies) ──────────────────────────────────────────────
+    # Peer comparison queries: lets SQLite go directly to ~13 institutions' rows
+    # instead of scanning the full source+FY slice (biggest win for all agencies)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_uei_fy     ON awards(source, inst_uei, fiscal_year);",
+    # Canonical name queries (get_scoped_pis, peer diversification)
+    "CREATE INDEX IF NOT EXISTS idx_awards_canonical_src_fy  ON awards(inst_canonical_name, source, fiscal_year);",
+    # ── NIH-SPECIFIC ─────────────────────────────────────────────────────────
+    # Heatmap + field_wide_stats (all-institution NIH scans)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_nih     ON awards(source, fiscal_year, nih_institute);",
+    # get_nih_institutes DISTINCT (sidebar dropdown)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_nih        ON awards(source, nih_institute);",
+    # ── NSF-SPECIFIC ─────────────────────────────────────────────────────────
+    # Directorate-level queries (top-level NSF)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_dir     ON awards(source, fiscal_year, dir_abbr);",
+    # Division-level queries (NSF drill-down)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_div     ON awards(source, fiscal_year, div_abbr);",
+    # Program element queries (NSF deepest level)
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_pgm     ON awards(source, fiscal_year, pgm_ele_name);",
+    # ── USASPENDING AGENCIES (DOD, DOE, NASA, ED, USDA, DOT, NEH, EPA, DHS) ──
+    # CFDA / opportunity number queries
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_opp     ON awards(source, fiscal_year, opportunity_number);",
 ]
 
 
@@ -123,6 +159,7 @@ def init_db():
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute(CREATE_TABLE_SQL)
+        conn.execute(CREATE_REFRESH_LOG_SQL)
         for idx_sql in CREATE_INDEXES_SQL:
             conn.execute(idx_sql)
         conn.commit()
@@ -169,6 +206,76 @@ def migrate_db():
 
         conn.commit()
     print("migrate_db() complete.")
+
+
+# ---------------------------------------------------------------------------
+# Backup & refresh logging
+# ---------------------------------------------------------------------------
+
+BACKUP_DIR = DB_PATH.parent / "backups"
+BACKUP_KEEP_DAYS = 7
+
+
+def backup_db() -> Path | None:
+    """Copy DB to backups/federal_awards_YYYY-MM-DD.db. Skips if today's backup exists.
+    Deletes backups older than BACKUP_KEEP_DAYS."""
+    if not DB_PATH.exists():
+        return None
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.now().strftime("%Y-%m-%d")
+    backup_path = BACKUP_DIR / f"federal_awards_{today}.db"
+    if not backup_path.exists():
+        shutil.copy2(DB_PATH, backup_path)
+        print(f"  Backup: {backup_path.name} ({backup_path.stat().st_size // (1024*1024)} MB)")
+    # Cleanup old backups
+    cutoff = datetime.now() - timedelta(days=BACKUP_KEEP_DAYS)
+    for f in BACKUP_DIR.glob("federal_awards_*.db"):
+        try:
+            date_str = f.stem.replace("federal_awards_", "")
+            file_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if file_date < cutoff:
+                f.unlink()
+                print(f"  Deleted old backup: {f.name}")
+        except ValueError:
+            pass
+    return backup_path
+
+
+def log_refresh_start(source: str, details: str = None) -> int:
+    """Log the start of a refresh job. Returns the log row ID."""
+    with _connect() as conn:
+        conn.execute(CREATE_REFRESH_LOG_SQL)
+        cur = conn.execute(
+            "INSERT INTO refresh_log (source, started_at, status, details) VALUES (?, ?, 'running', ?)",
+            (source, datetime.now().isoformat(), details),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def log_refresh_end(log_id: int, status: str, records_fetched: int = 0,
+                    records_upserted: int = 0, error_message: str = None):
+    """Log the end of a refresh job."""
+    with _connect() as conn:
+        conn.execute(
+            """UPDATE refresh_log
+               SET finished_at = ?, status = ?, records_fetched = ?,
+                   records_upserted = ?, error_message = ?
+               WHERE id = ?""",
+            (datetime.now().isoformat(), status, records_fetched,
+             records_upserted, error_message, log_id),
+        )
+        conn.commit()
+
+
+def get_refresh_history(limit: int = 20) -> list[dict]:
+    """Return recent refresh log entries."""
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM refresh_log ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 def upsert_nsf_award(record: dict):

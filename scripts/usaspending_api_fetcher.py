@@ -34,7 +34,7 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.db import init_db, upsert_nsf_awards_batch, DB_PATH
+from src.db import init_db, upsert_nsf_awards_batch, DB_PATH, log_refresh_start, log_refresh_end
 
 BULK_DOWNLOAD_URL = "https://api.usaspending.gov/api/v2/bulk_download/awards/"
 STATUS_URL        = "https://api.usaspending.gov/api/v2/bulk_download/status/"
@@ -508,70 +508,78 @@ def load_all_years(skip_agencies: str = "") -> None:
     skip = {s.strip().lower() for s in skip_agencies.split(",") if s.strip()}
 
     init_db()
+    log_id = log_refresh_start("usaspending", f"load_all_years skip={skip_agencies}")
 
-    year_dirs = sorted(
-        (d for d in RAW_DIR.iterdir() if d.is_dir() and d.name.isdigit()),
-        key=lambda d: int(d.name)
-    )
+    try:
+        year_dirs = sorted(
+            (d for d in RAW_DIR.iterdir() if d.is_dir() and d.name.isdigit()),
+            key=lambda d: int(d.name)
+        )
 
-    results = []
-    total_read = total_upserted = total_skipped = 0
-    total_funding = 0.0
+        results = []
+        total_read = total_upserted = total_skipped = 0
+        total_funding = 0.0
 
-    for year_dir in year_dirs:
-        fy = int(year_dir.name)
-        for jsonl_path in sorted(year_dir.glob("*.jsonl")):
-            stem = jsonl_path.stem  # e.g. DOE_FY2019
-            agency_key = stem.split("_")[0].lower()
+        for year_dir in year_dirs:
+            fy = int(year_dir.name)
+            for jsonl_path in sorted(year_dir.glob("*.jsonl")):
+                stem = jsonl_path.stem  # e.g. DOE_FY2019
+                agency_key = stem.split("_")[0].lower()
 
-            if agency_key in skip:
-                continue
-            if agency_key not in AGENCIES:
-                continue
+                if agency_key in skip:
+                    continue
+                if agency_key not in AGENCIES:
+                    continue
 
-            done_path = jsonl_path.with_suffix(".done")
-            if not done_path.exists():
-                print(f"  SKIP {stem} — no .done sentinel, download may be incomplete")
-                results.append({"file": stem, "status": "skipped_incomplete"})
-                continue
+                done_path = jsonl_path.with_suffix(".done")
+                if not done_path.exists():
+                    print(f"  SKIP {stem} — no .done sentinel, download may be incomplete")
+                    results.append({"file": stem, "status": "skipped_incomplete"})
+                    continue
 
-            print(f"  Loading {stem}...", end=" ", flush=True)
-            counts = load_from_jsonl(jsonl_path, agency_key)
+                print(f"  Loading {stem}...", end=" ", flush=True)
+                counts = load_from_jsonl(jsonl_path, agency_key)
 
-            if counts.get("error"):
-                print(f"ERROR: {counts['error']}")
-                results.append({"file": stem, "status": "error", **counts})
-                continue
+                if counts.get("error"):
+                    print(f"ERROR: {counts['error']}")
+                    results.append({"file": stem, "status": "error", **counts})
+                    continue
 
-            total_read     += counts["read"]
-            total_upserted += counts["upserted"]
-            total_skipped  += counts["skipped"]
-            total_funding  += counts["funding"]
+                total_read     += counts["read"]
+                total_upserted += counts["upserted"]
+                total_skipped  += counts["skipped"]
+                total_funding  += counts["funding"]
 
-            print(f"read={counts['read']:,}  upserted={counts['upserted']:,}  "
-                  f"skipped={counts['skipped']}  funding=${counts['funding']/1e9:.2f}B")
-            results.append({"file": stem, "fy": fy, "agency": agency_key,
-                            "status": "ok", **counts})
+                print(f"read={counts['read']:,}  upserted={counts['upserted']:,}  "
+                      f"skipped={counts['skipped']}  funding=${counts['funding']/1e9:.2f}B")
+                results.append({"file": stem, "fy": fy, "agency": agency_key,
+                                "status": "ok", **counts})
 
-    # Summary
-    loaded = [r for r in results if r["status"] == "ok"]
-    print(f"\n{'='*65}")
-    print(f"  LOAD COMPLETE")
-    print(f"{'='*65}")
-    print(f"  Files loaded   : {len(loaded)}")
-    print(f"  Total read     : {total_read:,}")
-    print(f"  Total upserted : {total_upserted:,}")
-    print(f"  Total skipped  : {total_skipped:,}")
-    print(f"  Total funding  : ${total_funding/1e9:.2f}B")
+        # Summary
+        loaded = [r for r in results if r["status"] == "ok"]
+        print(f"\n{'='*65}")
+        print(f"  LOAD COMPLETE")
+        print(f"{'='*65}")
+        print(f"  Files loaded   : {len(loaded)}")
+        print(f"  Total read     : {total_read:,}")
+        print(f"  Total upserted : {total_upserted:,}")
+        print(f"  Total skipped  : {total_skipped:,}")
+        print(f"  Total funding  : ${total_funding/1e9:.2f}B")
 
-    errors = [r for r in results if r["status"] == "error"]
-    incomplete = [r for r in results if r["status"] == "skipped_incomplete"]
-    if errors:
-        print(f"\n  ERRORS ({len(errors)}):")
-        for r in errors: print(f"    {r['file']}: {r.get('error')}")
-    if incomplete:
-        print(f"\n  INCOMPLETE DOWNLOADS ({len(incomplete)}):")
-        for r in incomplete: print(f"    {r['file']}")
+        errors = [r for r in results if r["status"] == "error"]
+        incomplete = [r for r in results if r["status"] == "skipped_incomplete"]
+        if errors:
+            print(f"\n  ERRORS ({len(errors)}):")
+            for r in errors: print(f"    {r['file']}: {r.get('error')}")
+        if incomplete:
+            print(f"\n  INCOMPLETE DOWNLOADS ({len(incomplete)}):")
+            for r in incomplete: print(f"    {r['file']}")
+
+        status = "success" if not errors else "partial"
+        log_refresh_end(log_id, status, total_read, total_upserted)
+    except Exception as e:
+        log_refresh_end(log_id, "failed", error_message=str(e))
+        raise
 
 
 def run_summary_query() -> None:

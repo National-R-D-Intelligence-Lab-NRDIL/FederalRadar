@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.db import init_db, upsert_nsf_awards_batch, DB_PATH
+from src.db import init_db, upsert_nsf_awards_batch, DB_PATH, log_refresh_start, log_refresh_end
 
 BASE_URL = "https://api.nsf.gov/services/v1/awards.json"
 PRINT_FIELDS = (
@@ -332,29 +332,36 @@ def main():
     print(f"Fetching NSF awards from {date_start} to {date_end} (--days={args.days})\n")
 
     init_db()
+    log_id = log_refresh_start("nsf", f"--days {args.days}")
 
-    raw_records = fetch_all(date_start, date_end)
-    if not raw_records:
-        print("No records returned.")
-        return
+    try:
+        raw_records = fetch_all(date_start, date_end)
+        if not raw_records:
+            print("No records returned.")
+            log_refresh_end(log_id, "success", 0, 0)
+            return
 
-    # snapshot existing IDs to distinguish inserts vs updates
-    conn = sqlite3.connect(DB_PATH)
-    existing_ids = set(
-        row[0] for row in conn.execute("SELECT awd_id FROM awards").fetchall()
-    )
-    conn.close()
+        # snapshot existing IDs to distinguish inserts vs updates
+        conn = sqlite3.connect(DB_PATH)
+        existing_ids = set(
+            row[0] for row in conn.execute("SELECT awd_id FROM awards").fetchall()
+        )
+        conn.close()
 
-    mapped = [map_record(r) for r in raw_records if r.get("id")]
+        mapped = [map_record(r) for r in raw_records if r.get("id")]
 
-    inserted = sum(1 for r in mapped if r["awd_id"] not in existing_ids)
-    updated  = len(mapped) - inserted
+        inserted = sum(1 for r in mapped if r["awd_id"] not in existing_ids)
+        updated  = len(mapped) - inserted
 
-    upsert_nsf_awards_batch(mapped)
+        upsert_nsf_awards_batch(mapped)
 
-    print(f"\nFetched:  {len(raw_records):>6,}")
-    print(f"Inserted: {inserted:>6,}")
-    print(f"Updated:  {updated:>6,}")
+        print(f"\nFetched:  {len(raw_records):>6,}")
+        print(f"Inserted: {inserted:>6,}")
+        print(f"Updated:  {updated:>6,}")
+        log_refresh_end(log_id, "success", len(raw_records), len(mapped))
+    except Exception as e:
+        log_refresh_end(log_id, "failed", error_message=str(e))
+        raise
 
 
 if __name__ == "__main__":

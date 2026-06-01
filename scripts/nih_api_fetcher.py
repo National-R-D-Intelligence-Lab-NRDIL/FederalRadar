@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from src.db import init_db, upsert_nsf_awards_batch, DB_PATH
+from src.db import init_db, upsert_nsf_awards_batch, DB_PATH, log_refresh_start, log_refresh_end
 
 URL = "https://api.reporter.nih.gov/v2/projects/search"
 LIMIT = 500
@@ -450,32 +450,42 @@ def main():
 
     init_db()
 
-    if args.days:
-        today = date.today()
-        date_to = today.strftime("%Y-%m-%d")
-        date_from = (today - timedelta(days=args.days)).strftime("%Y-%m-%d")
-        print(f"Fetching NIH awards: award_notice_date {date_from} -> {date_to}\n")
-        raw_records = fetch_all_by_date_range(date_from, date_to)
-    else:
-        fiscal_years = [int(y.strip()) for y in args.fiscal_years.split(",")]
-        print(f"Fetching NIH awards for fiscal years: {fiscal_years}\n")
-        raw_records = fetch_all_by_fiscal_years(fiscal_years)
+    details = f"--days {args.days}" if args.days else f"--fiscal-years {args.fiscal_years}"
+    log_id = log_refresh_start("nih", details)
 
-    if not raw_records:
-        print("No records returned.")
-        return
+    try:
+        if args.days:
+            today = date.today()
+            date_to = today.strftime("%Y-%m-%d")
+            date_from = (today - timedelta(days=args.days)).strftime("%Y-%m-%d")
+            print(f"Fetching NIH awards: award_notice_date {date_from} -> {date_to}\n")
+            raw_records = fetch_all_by_date_range(date_from, date_to)
+        else:
+            fiscal_years = [int(y.strip()) for y in args.fiscal_years.split(",")]
+            print(f"Fetching NIH awards for fiscal years: {fiscal_years}\n")
+            raw_records = fetch_all_by_fiscal_years(fiscal_years)
 
-    mapped = [map_record(r) for r in raw_records if r.get("project_num")]
+        if not raw_records:
+            print("No records returned.")
+            log_refresh_end(log_id, "success", 0, 0)
+            return
 
-    print(f"\nFetched:  {len(raw_records):>6,}")
-    print(f"Mapped:   {len(mapped):>6,}")
+        mapped = [map_record(r) for r in raw_records if r.get("project_num")]
 
-    if args.dry_run:
-        print("--dry-run: skipping DB writes.")
-        return
+        print(f"\nFetched:  {len(raw_records):>6,}")
+        print(f"Mapped:   {len(mapped):>6,}")
 
-    upsert_nsf_awards_batch(mapped)
-    print(f"Upserted: {len(mapped):>6,}")
+        if args.dry_run:
+            print("--dry-run: skipping DB writes.")
+            log_refresh_end(log_id, "dry_run", len(raw_records), 0)
+            return
+
+        upsert_nsf_awards_batch(mapped)
+        print(f"Upserted: {len(mapped):>6,}")
+        log_refresh_end(log_id, "success", len(raw_records), len(mapped))
+    except Exception as e:
+        log_refresh_end(log_id, "failed", error_message=str(e))
+        raise
 
 
 if __name__ == "__main__":
