@@ -1176,3 +1176,214 @@ def get_expiring_summary(inst_name: str, horizon_date: str,
         "largest_award_m": row[2],
         "pis_affected": row[3],
     }
+
+
+# ---------------------------------------------------------------------------
+# Action Dashboard queries
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def get_agency_money_movement(
+    my_ueis: tuple[str, ...],
+    peer_ueis: tuple[str, ...],
+) -> pd.DataFrame:
+    """FY2025 YTD vs FY2026 YTD per agency, apples-to-apples month cutoff.
+
+    Federal FY runs Oct–Sep.  We find the latest obligation month in FY2026
+    and restrict FY2025 to the same Oct-through-Month window so the
+    comparison is fair.  FY2025 "rest of year" (months after the cutoff)
+    is returned separately so the VPR can see what's still potentially
+    coming in FY2026.
+
+    Returns: source | fy25_ytd_m | fy25_rest_m | fy26_ytd_m |
+             pct_change | unt_fy25_m | unt_fy26_m
+    """
+    if not my_ueis:
+        return pd.DataFrame()
+
+    uei_ph_my = ",".join("?" * len(my_ueis)) if my_ueis else "NULL"
+
+    # Find the latest obligation_date in FY2026 to set the cutoff.
+    # FY2025 starts 2024-10-01; FY2026 starts 2025-10-01.
+    # We'll compare the same calendar window: FY-start through cutoff date.
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(obligation_date) "
+            "FROM awards WHERE fiscal_year = 2026 AND obligation_date IS NOT NULL "
+            "AND awd_amount > 0"
+        ).fetchone()
+    fy26_latest = row[0] if row and row[0] else "2026-05-31"
+
+    # Extract month-day to build the FY25 cutoff at the same point
+    # e.g. if FY26 latest is 2026-05-31, FY25 cutoff is 2025-05-31
+    cutoff_mmdd = fy26_latest[5:]  # "05-31"
+    fy25_ytd_end = f"2025-{cutoff_mmdd}"
+    fy25_rest_start = f"2025-{cutoff_mmdd}"
+
+    sql = f"""
+        SELECT source,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2025
+                   AND obligation_date <= ?
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS fy25_ytd_m,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2025
+                   AND obligation_date > ?
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS fy25_rest_m,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2026
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS fy26_ytd_m,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2025
+                   AND obligation_date <= ?
+                   AND inst_uei IN ({uei_ph_my})
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS unt_fy25_m,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2025
+                   AND inst_uei IN ({uei_ph_my})
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS unt_fy25_full_m,
+               ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2026
+                   AND inst_uei IN ({uei_ph_my})
+                   THEN awd_amount ELSE 0 END), 0) / 1e6, 2)   AS unt_fy26_m
+        FROM awards
+        WHERE fiscal_year IN (2025, 2026)
+          AND awd_amount > 0
+          AND obligation_date IS NOT NULL
+        GROUP BY source
+        HAVING fy25_ytd_m > 0 OR fy26_ytd_m > 0
+        ORDER BY (fy26_ytd_m - fy25_ytd_m) DESC
+    """
+    params = [fy25_ytd_end, fy25_rest_start, fy25_ytd_end] + list(my_ueis) + list(my_ueis) + list(my_ueis)
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+
+    if not df.empty:
+        df["change_m"] = df["fy26_ytd_m"] - df["fy25_ytd_m"]
+        df["pct_change"] = df.apply(
+            lambda r: round((r["fy26_ytd_m"] - r["fy25_ytd_m"]) / r["fy25_ytd_m"] * 100, 1)
+            if r["fy25_ytd_m"] > 0 else None, axis=1,
+        )
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_missed_opportunities(
+    my_ueis: tuple[str, ...],
+    peer_ueis: tuple[str, ...],
+) -> pd.DataFrame:
+    """Programs where peers won FY2025-2026 awards but UNT got nothing.
+
+    Returns: source | opportunity_number | peer_awards | peer_funding_m |
+             peer_inst_count | peer_names
+    """
+    if not my_ueis or not peer_ueis:
+        return pd.DataFrame()
+
+    my_ph = ",".join("?" * len(my_ueis))
+    peer_ph = ",".join("?" * len(peer_ueis))
+
+    sql = f"""
+        SELECT p.source,
+               p.opportunity_number,
+               p.peer_awards,
+               p.peer_funding_m,
+               p.peer_inst_count,
+               p.peer_names
+        FROM (
+            SELECT source,
+                   COALESCE(opportunity_number, dir_abbr, nih_institute) AS opportunity_number,
+                   COUNT(*) AS peer_awards,
+                   ROUND(SUM(awd_amount) / 1e6, 2) AS peer_funding_m,
+                   COUNT(DISTINCT inst_canonical_name) AS peer_inst_count,
+                   GROUP_CONCAT(DISTINCT inst_canonical_name) AS peer_names
+            FROM awards
+            WHERE fiscal_year IN (2025, 2026)
+              AND inst_uei IN ({peer_ph})
+              AND awd_amount > 0
+            GROUP BY source, COALESCE(opportunity_number, dir_abbr, nih_institute)
+        ) p
+        WHERE NOT EXISTS (
+            SELECT 1 FROM awards u
+            WHERE u.fiscal_year IN (2025, 2026)
+              AND u.inst_uei IN ({my_ph})
+              AND u.source = p.source
+              AND COALESCE(u.opportunity_number, u.dir_abbr, u.nih_institute) = p.opportunity_number
+              AND u.awd_amount > 0
+        )
+        ORDER BY p.peer_funding_m DESC
+    """
+    params = list(peer_ueis) + list(my_ueis)
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_lapsed_programs(my_ueis: tuple[str, ...]) -> pd.DataFrame:
+    """Truly dormant programs — UNT won historically (last award FY2022
+    or earlier) with no FY2023+ activity.  Filters out noise:
+    - min $0.5M past funding
+    - excludes ED non-research CFDAs (student aid, CARES, etc.)
+
+    Returns: source | opportunity_number | past_awards | past_funding_m | last_fy
+    """
+    if not my_ueis:
+        return pd.DataFrame()
+
+    my_ph = ",".join("?" * len(my_ueis))
+    ed_ph = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+
+    sql = f"""
+        SELECT h.source,
+               h.prog AS opportunity_number,
+               h.past_awards,
+               h.past_funding_m,
+               h.last_fy
+        FROM (
+            SELECT source,
+                   COALESCE(opportunity_number, dir_abbr, nih_institute) AS prog,
+                   COUNT(*) AS past_awards,
+                   ROUND(SUM(awd_amount) / 1e6, 2) AS past_funding_m,
+                   MAX(fiscal_year) AS last_fy
+            FROM awards
+            WHERE fiscal_year <= 2022
+              AND inst_uei IN ({my_ph})
+              AND awd_amount > 0
+              AND NOT (source = 'ed' AND opportunity_number IN ({ed_ph}))
+            GROUP BY source, COALESCE(opportunity_number, dir_abbr, nih_institute)
+            HAVING past_funding_m >= 0.5
+        ) h
+        WHERE NOT EXISTS (
+            SELECT 1 FROM awards r
+            WHERE r.fiscal_year >= 2023
+              AND r.inst_uei IN ({my_ph})
+              AND r.source = h.source
+              AND COALESCE(r.opportunity_number, r.dir_abbr, r.nih_institute) = h.prog
+              AND r.awd_amount > 0
+        )
+        ORDER BY h.past_funding_m DESC
+    """
+    params = list(my_ueis) + list(ED_NON_RESEARCH_CFDAS) + list(my_ueis)
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_data_freshness() -> pd.DataFrame:
+    """Data freshness: last successful refresh + record counts per source.
+
+    Returns: source | record_count | last_refresh_at | status
+    """
+    sql = """
+        SELECT a.source,
+               a.record_count,
+               r.finished_at AS last_refresh_at,
+               COALESCE(r.status, 'never') AS status
+        FROM (
+            SELECT source, COUNT(*) AS record_count
+            FROM awards GROUP BY source
+        ) a
+        LEFT JOIN (
+            SELECT source, finished_at, status,
+                   ROW_NUMBER() OVER (PARTITION BY source ORDER BY finished_at DESC) AS rn
+            FROM refresh_log
+            WHERE status = 'success'
+        ) r ON r.source = a.source AND r.rn = 1
+        ORDER BY a.source
+    """
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn)
