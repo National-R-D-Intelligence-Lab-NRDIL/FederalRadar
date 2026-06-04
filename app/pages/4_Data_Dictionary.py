@@ -5,7 +5,7 @@ Agency abbreviations, data coverage, and planned additions.
 
 import streamlit as st
 
-from queries import MY_INSTITUTION, get_data_freshness
+from queries import ED_EXCLUSION_NOTE, MY_INSTITUTION, get_data_freshness
 
 st.set_page_config(page_title="Data Dictionary — Federal Radar", layout="wide")
 
@@ -24,7 +24,7 @@ CURRENT_AGENCIES = {
     "nih":      ("National Institutes of Health", "NIH RePORTER API", "Biomedical & public health research grants"),
     "dod":      ("Department of Defense", "USAspending API", "Defense research, DARPA, service branch R&D"),
     "doe":      ("Department of Energy", "USAspending API", "Energy research, national lab funding, ARPA-E"),
-    "ed":       ("Department of Education", "USAspending API", "Education research, TRIO, Title III (excludes student aid)"),
+    "ed":       ("Department of Education", "USAspending API", "IES research, FIPSE, EIR (excludes HEERF/CARES, TRIO, formula grants)"),
     "nasa":     ("National Aeronautics & Space Administration", "USAspending API", "Space & aeronautics research, SBIR/STTR"),
     "usda":     ("Department of Agriculture", "USAspending API", "NIFA grants, agricultural & food science research"),
     "epa":      ("Environmental Protection Agency", "USAspending API", "Environmental research, STAR grants"),
@@ -61,6 +61,7 @@ st.dataframe(df_current, use_container_width=True,
              height=55 + 38 * len(df_current))
 
 st.caption(f"{len(CURRENT_AGENCIES)} agencies · {df_fresh['record_count'].sum():,} total award records")
+st.caption(f"ℹ️ {ED_EXCLUSION_NOTE}")
 
 # ---------------------------------------------------------------------------
 # Agencies planned for addition

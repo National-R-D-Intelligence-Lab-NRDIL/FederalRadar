@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from queries import (
+    ED_EXCLUSION_NOTE,
     MY_INSTITUTION,
     PEER_SHORT,
     get_my_ueis,
@@ -50,6 +51,7 @@ if not my_ueis:
 
 st.markdown("# Action Dashboard")
 st.caption("FY2025–2026 · Cross-Agency · Where's the money?")
+st.caption(f"ℹ️ {ED_EXCLUSION_NOTE}")
 
 # =========================================================================
 # Panel 1: Where's the Money Moving?

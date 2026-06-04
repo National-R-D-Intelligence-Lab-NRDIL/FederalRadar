@@ -31,6 +31,7 @@ def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
     except Exception:
         return None
 from queries import (
+    ED_EXCLUSION_NOTE,
     ED_NON_RESEARCH_CFDAS,
     MY_INSTITUTION,
     NSF_DIR_NAMES,
@@ -103,8 +104,8 @@ with st.sidebar:
 
     else:
         if agency == "ed":
-            if st.checkbox("Exclude non-research (student aid, CARES)", value=False):
-                ed_exclude_cfdas = ED_NON_RESEARCH_CFDAS
+            ed_exclude_cfdas = ED_NON_RESEARCH_CFDAS
+            st.caption(f"ℹ️ {ED_EXCLUSION_NOTE}")
 
     st.divider()
 

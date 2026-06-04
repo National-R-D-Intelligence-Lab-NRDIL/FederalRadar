@@ -87,11 +87,43 @@ PEER_SHORT = {
 }
 
 
-# ED (Dept of Education) CFDA codes that are non-research (student aid, CARES, etc.)
+# ED (Dept of Education) CFDA codes that are non-research.
+# Excluded: HEERF/CARES Act, formula grants (TRIO, Impact Aid, Title III,
+# Indian Ed, Rural Ed, Adult Ed).  Only IES research, FIPSE, EIR, etc. remain.
 ED_NON_RESEARCH_CFDAS = (
-    "84.425", "84.041", "84.042", "84.044", "84.047",
-    "84.031", "84.007", "84.033", "84.063", "84.268",
-    "84.002", "84.004", "84.379",
+    # HEERF / CARES Act / COVID relief
+    "84.425", "84.403", "84.405", "84.407", "84.414", "84.415",
+    "84.416", "84.418", "84.421", "84.422", "84.424", "84.428",
+    "84.396",
+    # Formula / student aid / institutional aid
+    "84.041",  # Impact Aid
+    "84.031",  # Title III (Strengthening Institutions)
+    "84.042",  # TRIO Student Support Services
+    "84.044",  # TRIO Talent Search
+    "84.047",  # TRIO Upward Bound
+    "84.060",  # Indian Education
+    "84.358",  # Rural Education
+    "84.002",  # Adult Education
+    "84.007",  # Federal Supplemental Ed Opportunity Grants
+    "84.033",  # Federal Work-Study
+    "84.063",  # Federal Pell Grant
+    "84.268",  # Federal Direct Loans
+    "84.004",  # Civil Rights Training
+    "84.379",  # Teacher Education Assistance
+    "84.334",  # Gaining Early Awareness (GEAR UP)
+    "84.165",  # Magnet Schools
+    "84.374",  # Teacher & School Leader Incentive
+    "84.365",  # English Language Acquisition
+    "84.066",  # TRIO Educational Opportunity Centers
+    "84.382",  # Strengthening Institutions (STEM)
+    "84.048",  # Career & Technical Education
+    "84.015",  # National Resource Centers
+)
+
+# Human-readable note for UI display
+ED_EXCLUSION_NOTE = (
+    "ED excludes HEERF/CARES Act and formula grants "
+    "(TRIO, Impact Aid, Title III) — research awards only."
 )
 
 
@@ -201,14 +233,16 @@ def get_nih_activity_codes(institute: str | None = None) -> list[str]:
 @st.cache_data(ttl=3600)
 def get_cfda_programs(agency: str) -> list[tuple[str, str]]:
     """Returns (opportunity_number, cfda_title) for a USASpending agency."""
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         rows = conn.execute(
-            """SELECT DISTINCT opportunity_number,
+            f"""SELECT DISTINCT opportunity_number,
                       COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)
                FROM awards
                WHERE source = ? AND opportunity_number IS NOT NULL
+                 AND {ed_clause}
                ORDER BY opportunity_number""",
-            (agency,),
+            (agency, *ed_params),
         ).fetchall()
     return rows
 
@@ -217,11 +251,29 @@ def get_cfda_programs(agency: str) -> list[tuple[str, str]]:
 # Program Explorer queries
 # ---------------------------------------------------------------------------
 
+def _ed_exclusion_clause(alias: str = "") -> tuple[str, list]:
+    """Return (SQL fragment, params) to exclude non-research ED CFDAs.
+
+    If *alias* is given (e.g. 'a'), columns are prefixed as a.source, etc.
+    """
+    prefix = f"{alias}." if alias else ""
+    ph = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+    clause = (
+        f"NOT ({prefix}source = 'ed' AND {prefix}opportunity_number IN ({ph}))"
+    )
+    return clause, list(ED_NON_RESEARCH_CFDAS)
+
+
 def _build_filter(source, division=None, subdiv=None, program=None,
                   institute=None, activity_code=None, cfda=None):
     """Return (WHERE clause, params) for the given filter combination."""
     clauses = ["source = ?"]
     params = [source]
+    # Exclude non-research ED programs automatically
+    if source == "ed":
+        ed_clause, ed_params = _ed_exclusion_clause()
+        clauses.append(ed_clause)
+        params.extend(ed_params)
     if source == "nsf":
         if division:
             clauses.append("dir_abbr = ?")
@@ -414,15 +466,16 @@ def search_institutions(query: str, limit=20) -> list[str]:
 
 @st.cache_data(ttl=3600)
 def get_institution_summary(inst_name: str) -> dict:
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         row = conn.execute(
-            """SELECT COUNT(*) as awards,
+            f"""SELECT COUNT(*) as awards,
                       ROUND(SUM(awd_amount) / 1e6, 2) as total_m,
                       COUNT(DISTINCT source) as agencies,
                       MIN(fiscal_year) as first_fy,
                       MAX(fiscal_year) as last_fy
-               FROM awards WHERE inst_canonical_name = ?""",
-            (inst_name,),
+               FROM awards WHERE inst_canonical_name = ? AND {ed_clause}""",
+            (inst_name, *ed_params),
         ).fetchone()
     return {
         "awards": row[0], "total_m": row[1],
@@ -432,31 +485,34 @@ def get_institution_summary(inst_name: str) -> dict:
 
 @st.cache_data(ttl=3600)
 def get_institution_by_agency(inst_name: str) -> pd.DataFrame:
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         df = pd.read_sql_query(
-            """SELECT source as Agency,
+            f"""SELECT source as Agency,
                       COUNT(*) as Awards,
                       ROUND(SUM(awd_amount) / 1e6, 2) as [Total ($M)],
                       MIN(fiscal_year) as [First FY],
                       MAX(fiscal_year) as [Last FY]
-               FROM awards WHERE inst_canonical_name = ?
+               FROM awards WHERE inst_canonical_name = ? AND {ed_clause}
                GROUP BY source ORDER BY [Total ($M)] DESC""",
-            conn, params=(inst_name,),
+            conn, params=(inst_name, *ed_params),
         )
     return df
 
 
 @st.cache_data(ttl=3600)
 def get_institution_trend(inst_name: str) -> pd.DataFrame:
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         df = pd.read_sql_query(
-            """SELECT fiscal_year, source,
+            f"""SELECT fiscal_year, source,
                       ROUND(SUM(awd_amount) / 1e6, 2) as total_m
                FROM awards
                WHERE inst_canonical_name = ? AND fiscal_year IS NOT NULL
+                 AND {ed_clause}
                GROUP BY fiscal_year, source
                ORDER BY fiscal_year""",
-            conn, params=(inst_name,),
+            conn, params=(inst_name, *ed_params),
         )
     return df
 
@@ -481,6 +537,10 @@ def get_scoped_pis(
         "pi_name != ''",
     ]
     params: list = [inst_name, agency, fy_start, fy_end]
+    if agency == "ed":
+        ed_clause, ed_params = _ed_exclusion_clause()
+        clauses.append(ed_clause)
+        params.extend(ed_params)
 
     if agency == "nih":
         extra_select = "nih_institute, activity_code,"
@@ -524,11 +584,13 @@ def get_scoped_pis(
 
 @st.cache_data(ttl=3600)
 def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFrame:
+    ed_clause, ed_params = _ed_exclusion_clause()
     params = [inst_name]
     source_clause = ""
     if source:
         source_clause = "AND source = ?"
         params.append(source)
+    params.extend(ed_params)
     with _conn() as conn:
         df = pd.read_sql_query(
             f"""SELECT pi_name as PI,
@@ -541,6 +603,7 @@ def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFra
                 FROM awards
                 WHERE inst_canonical_name = ? {source_clause}
                 AND pi_name IS NOT NULL AND pi_name != ''
+                AND {ed_clause}
                 GROUP BY pi_name, source
                 ORDER BY [Total ($M)] DESC""",
             conn, params=params,
@@ -551,6 +614,7 @@ def get_institution_pis(inst_name: str, source: str | None = None) -> pd.DataFra
 @st.cache_data(ttl=3600)
 def get_institution_awards(inst_name: str, source: str | None = None,
                            fy: int | None = None) -> pd.DataFrame:
+    ed_clause, ed_params = _ed_exclusion_clause()
     clauses = ["inst_canonical_name = ?"]
     params = [inst_name]
     if source:
@@ -559,6 +623,8 @@ def get_institution_awards(inst_name: str, source: str | None = None,
     if fy:
         clauses.append("fiscal_year = ?")
         params.append(fy)
+    clauses.append(ed_clause)
+    params.extend(ed_params)
     where = " AND ".join(clauses)
     with _conn() as conn:
         df = pd.read_sql_query(
@@ -962,6 +1028,7 @@ def get_pis_for_program(
     fy_end: int,
 ) -> pd.DataFrame:
     """PIs at a given institution who won awards in a specific program."""
+    ed_clause, ed_params = _ed_exclusion_clause()
     sql = f"""
         SELECT pi_name AS PI,
                COUNT(*) AS Awards,
@@ -975,12 +1042,13 @@ def get_pis_for_program(
           AND fiscal_year BETWEEN ? AND ?
           AND awd_amount > 0
           AND pi_name IS NOT NULL AND pi_name != ''
+          AND {ed_clause}
         GROUP BY pi_name
         ORDER BY [Total Funding] DESC
     """
     with _conn() as conn:
         df = pd.read_sql_query(
-            sql, conn, params=(agency, program_abbr, institution, fy_start, fy_end)
+            sql, conn, params=(agency, program_abbr, institution, fy_start, fy_end, *ed_params)
         )
     df.index = range(1, len(df) + 1)
     # Keep FY columns as plain integers (not formatted as 2,024)
@@ -993,16 +1061,18 @@ def get_pis_for_program(
 @st.cache_data(ttl=3600)
 def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
     """Summary stats for the validation footer."""
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         row = conn.execute(
-            """SELECT COUNT(*) AS total_records,
+            f"""SELECT COUNT(*) AS total_records,
                       ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 1) AS total_funding_m,
                       MAX(updated_at) AS last_new_record,
                       SUM(CASE WHEN awd_amount < 0 THEN 1 ELSE 0 END) AS negative_excluded,
                       SUM(CASE WHEN awd_amount = 0 THEN 1 ELSE 0 END) AS zero_count
                FROM awards
-               WHERE source = ? AND fiscal_year BETWEEN ? AND ?""",
-            (agency, fy_start, fy_end),
+               WHERE source = ? AND fiscal_year BETWEEN ? AND ?
+                 AND {ed_clause}""",
+            (agency, fy_start, fy_end, *ed_params),
         ).fetchone()
         # NSF and NIH log under their own name; all USASpending agencies
         # log under the single key 'usaspending'
@@ -1033,18 +1103,20 @@ def get_portfolio_by_agency(inst_name: str, fy_start: int, fy_end: int) -> pd.Da
     """Funding breakdown by agency for one institution.
     Returns: source | awards | funding_m
     """
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         df = pd.read_sql_query(
-            """SELECT source,
+            f"""SELECT source,
                       COUNT(*) AS awards,
                       ROUND(SUM(awd_amount) / 1e6, 2) AS funding_m
                FROM awards
                WHERE inst_canonical_name = ?
                  AND fiscal_year BETWEEN ? AND ?
                  AND awd_amount > 0
+                 AND {ed_clause}
                GROUP BY source
                ORDER BY funding_m DESC""",
-            conn, params=(inst_name, fy_start, fy_end),
+            conn, params=(inst_name, fy_start, fy_end, *ed_params),
         )
     return df
 
@@ -1054,18 +1126,20 @@ def get_portfolio_trend(inst_name: str, fy_start: int, fy_end: int) -> pd.DataFr
     """Funding by agency and FY for one institution.
     Returns: fiscal_year | source | funding_m
     """
+    ed_clause, ed_params = _ed_exclusion_clause()
     with _conn() as conn:
         df = pd.read_sql_query(
-            """SELECT fiscal_year, source,
+            f"""SELECT fiscal_year, source,
                       ROUND(SUM(awd_amount) / 1e6, 2) AS funding_m
                FROM awards
                WHERE inst_canonical_name = ?
                  AND fiscal_year BETWEEN ? AND ?
                  AND awd_amount > 0
                  AND fiscal_year IS NOT NULL
+                 AND {ed_clause}
                GROUP BY fiscal_year, source
                ORDER BY fiscal_year, source""",
-            conn, params=(inst_name, fy_start, fy_end),
+            conn, params=(inst_name, fy_start, fy_end, *ed_params),
         )
     return df
 
@@ -1078,6 +1152,7 @@ def get_peer_diversification(inst_names: tuple[str, ...],
     """
     if not inst_names:
         return pd.DataFrame()
+    ed_clause, ed_params = _ed_exclusion_clause()
     placeholders = ",".join("?" * len(inst_names))
     sql = f"""
         SELECT inst_canonical_name AS institution, source,
@@ -1086,9 +1161,10 @@ def get_peer_diversification(inst_names: tuple[str, ...],
         WHERE inst_canonical_name IN ({placeholders})
           AND fiscal_year BETWEEN ? AND ?
           AND awd_amount > 0
+          AND {ed_clause}
         GROUP BY inst_canonical_name, source
     """
-    params = list(inst_names) + [fy_start, fy_end]
+    params = list(inst_names) + [fy_start, fy_end] + ed_params
     with _conn() as conn:
         df = pd.read_sql_query(sql, conn, params=params)
     if df.empty:
@@ -1123,13 +1199,15 @@ def get_expiring_awards(inst_name: str, horizon_date: str,
     """Awards ending between today and horizon_date.
     Returns: awd_id | pi_name | source | program | awd_amount | project_end_date | title
     """
+    ed_clause, ed_params = _ed_exclusion_clause()
     clauses = [
         "inst_canonical_name = ?",
         "project_end_date >= date('now')",
         "project_end_date <= ?",
         "awd_amount > 0",
+        ed_clause,
     ]
-    params: list = [inst_name, horizon_date]
+    params: list = [inst_name, horizon_date, *ed_params]
     if agency:
         clauses.append("source = ?")
         params.append(agency)
@@ -1159,13 +1237,15 @@ def get_expiring_awards(inst_name: str, horizon_date: str,
 def get_expiring_summary(inst_name: str, horizon_date: str,
                          agency: str | None = None) -> dict:
     """Aggregate stats for expiring awards scorecard."""
+    ed_clause, ed_params = _ed_exclusion_clause()
     clauses = [
         "inst_canonical_name = ?",
         "project_end_date >= date('now')",
         "project_end_date <= ?",
         "awd_amount > 0",
+        ed_clause,
     ]
-    params: list = [inst_name, horizon_date]
+    params: list = [inst_name, horizon_date, *ed_params]
     if agency:
         clauses.append("source = ?")
         params.append(agency)
@@ -1231,6 +1311,7 @@ def get_agency_money_movement(
     fy25_ytd_end = f"2025-{cutoff_mmdd}"
     fy25_rest_start = f"2025-{cutoff_mmdd}"
 
+    ed_clause, ed_params = _ed_exclusion_clause()
     sql = f"""
         SELECT source,
                ROUND(COALESCE(SUM(CASE WHEN fiscal_year = 2025
@@ -1255,11 +1336,12 @@ def get_agency_money_movement(
         WHERE fiscal_year IN (2025, 2026)
           AND awd_amount > 0
           AND obligation_date IS NOT NULL
+          AND {ed_clause}
         GROUP BY source
         HAVING fy25_ytd_m > 0 OR fy26_ytd_m > 0
         ORDER BY (fy26_ytd_m - fy25_ytd_m) DESC
     """
-    params = [fy25_ytd_end, fy25_rest_start, fy25_ytd_end] + list(my_ueis) + list(my_ueis) + list(my_ueis)
+    params = [fy25_ytd_end, fy25_rest_start, fy25_ytd_end] + list(my_ueis) + list(my_ueis) + list(my_ueis) + ed_params
     with _conn() as conn:
         df = pd.read_sql_query(sql, conn, params=params)
 
@@ -1288,6 +1370,8 @@ def get_missed_opportunities(
     my_ph = ",".join("?" * len(my_ueis))
     peer_ph = ",".join("?" * len(peer_ueis))
 
+    ed_clause, ed_params = _ed_exclusion_clause()
+    ed_clause_u, ed_params_u = _ed_exclusion_clause("u")
     sql = f"""
         SELECT p.source,
                p.opportunity_number,
@@ -1306,6 +1390,7 @@ def get_missed_opportunities(
             WHERE fiscal_year IN (2025, 2026)
               AND inst_uei IN ({peer_ph})
               AND awd_amount > 0
+              AND {ed_clause}
             GROUP BY source, COALESCE(opportunity_number, dir_abbr, nih_institute)
         ) p
         WHERE NOT EXISTS (
@@ -1315,10 +1400,11 @@ def get_missed_opportunities(
               AND u.source = p.source
               AND COALESCE(u.opportunity_number, u.dir_abbr, u.nih_institute) = p.opportunity_number
               AND u.awd_amount > 0
+              AND {ed_clause_u}
         )
         ORDER BY p.peer_funding_m DESC
     """
-    params = list(peer_ueis) + list(my_ueis)
+    params = list(peer_ueis) + ed_params + list(my_ueis) + ed_params_u
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)
 
@@ -1336,7 +1422,8 @@ def get_lapsed_programs(my_ueis: tuple[str, ...]) -> pd.DataFrame:
         return pd.DataFrame()
 
     my_ph = ",".join("?" * len(my_ueis))
-    ed_ph = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+    ed_clause, ed_params = _ed_exclusion_clause()
+    ed_clause_r, ed_params_r = _ed_exclusion_clause("r")
 
     sql = f"""
         SELECT h.source,
@@ -1354,7 +1441,7 @@ def get_lapsed_programs(my_ueis: tuple[str, ...]) -> pd.DataFrame:
             WHERE fiscal_year <= 2022
               AND inst_uei IN ({my_ph})
               AND awd_amount > 0
-              AND NOT (source = 'ed' AND opportunity_number IN ({ed_ph}))
+              AND {ed_clause}
             GROUP BY source, COALESCE(opportunity_number, dir_abbr, nih_institute)
             HAVING past_funding_m >= 0.5
         ) h
@@ -1365,10 +1452,11 @@ def get_lapsed_programs(my_ueis: tuple[str, ...]) -> pd.DataFrame:
               AND r.source = h.source
               AND COALESCE(r.opportunity_number, r.dir_abbr, r.nih_institute) = h.prog
               AND r.awd_amount > 0
+              AND {ed_clause_r}
         )
         ORDER BY h.past_funding_m DESC
     """
-    params = list(my_ueis) + list(ED_NON_RESEARCH_CFDAS) + list(my_ueis)
+    params = list(my_ueis) + ed_params + list(my_ueis) + ed_params_r
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)
 

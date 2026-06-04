@@ -10,6 +10,7 @@ import plotly.express as px
 import streamlit as st
 
 from queries import (
+    ED_EXCLUSION_NOTE,
     MY_INSTITUTION,
     PEER_SHORT,
     get_fy_bounds,
@@ -57,6 +58,7 @@ total_funding = df_port["funding_m"].sum()
 
 st.markdown("# Portfolio Risk")
 st.caption(f"FY{fy_start}–{fy_end}")
+st.caption(f"ℹ️ {ED_EXCLUSION_NOTE}")
 
 # ---------------------------------------------------------------------------
 # 1. Donut chart — UNT funding by agency

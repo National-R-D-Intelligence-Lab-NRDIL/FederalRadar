@@ -12,6 +12,7 @@ import plotly.express as px
 import streamlit as st
 
 from queries import (
+    ED_EXCLUSION_NOTE,
     MY_INSTITUTION,
     get_agencies,
     get_expiring_awards,
@@ -54,6 +55,7 @@ df_exp = get_expiring_awards(MY_INSTITUTION, horizon_date, agency_filter)
 
 st.markdown("# Expiring Awards")
 st.caption(f"Awards ending within {horizon_months} months (by {horizon_date})")
+st.caption(f"ℹ️ {ED_EXCLUSION_NOTE}")
 
 # ---------------------------------------------------------------------------
 # 1. Scorecard
