@@ -997,17 +997,24 @@ def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
         row = conn.execute(
             """SELECT COUNT(*) AS total_records,
                       ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 1) AS total_funding_m,
-                      MAX(updated_at) AS last_updated,
+                      MAX(updated_at) AS last_new_record,
                       SUM(CASE WHEN awd_amount < 0 THEN 1 ELSE 0 END) AS negative_excluded,
                       SUM(CASE WHEN awd_amount = 0 THEN 1 ELSE 0 END) AS zero_count
                FROM awards
                WHERE source = ? AND fiscal_year BETWEEN ? AND ?""",
             (agency, fy_start, fy_end),
         ).fetchone()
+        refresh_row = conn.execute(
+            """SELECT MAX(finished_at) FROM refresh_log
+               WHERE source = ? AND status = 'success'""",
+            (agency,),
+        ).fetchone()
+    last_checked = refresh_row[0] if refresh_row and refresh_row[0] else None
     return {
         "total_records": row[0],
         "total_funding_m": row[1],
-        "last_updated": row[2],
+        "last_new_record": row[2],
+        "last_checked": last_checked,
         "negative_excluded": row[3],
         "zero_count": row[4],
     }

@@ -922,9 +922,15 @@ if _vstats["negative_excluded"] and _vstats["negative_excluded"] > 0:
 if _vstats["zero_count"] and _vstats["zero_count"] > 0:
     _warnings.append(f"{_vstats['zero_count']:,} zero-amount records in dataset")
 
+_last_checked = (_vstats["last_checked"] or "")[:10]
+_last_record = (_vstats["last_new_record"] or "")[:10]
+_freshness = (
+    f"Last checked: {_last_checked or 'unknown'} · "
+    f"Last new record: {_last_record or 'unknown'}"
+)
 st.caption(
     f"**Data Quality** · {_vstats['total_records']:,} records · "
     f"${_vstats['total_funding_m']:,.1f}M total funding · "
-    f"Last updated: {_vstats['last_updated'] or 'unknown'}"
+    f"{_freshness}"
     + (f" · Warnings: {'; '.join(_warnings)}" if _warnings else "")
 )
