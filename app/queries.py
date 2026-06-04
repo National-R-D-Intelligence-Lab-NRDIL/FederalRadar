@@ -1004,10 +1004,14 @@ def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
                WHERE source = ? AND fiscal_year BETWEEN ? AND ?""",
             (agency, fy_start, fy_end),
         ).fetchone()
+        # NSF and NIH log under their own name; all USASpending agencies
+        # log under the single key 'usaspending'
+        _NSF_NIH = {"nsf", "nih"}
+        log_source = agency if agency in _NSF_NIH else "usaspending"
         refresh_row = conn.execute(
             """SELECT MAX(finished_at) FROM refresh_log
                WHERE source = ? AND status = 'success'""",
-            (agency,),
+            (log_source,),
         ).fetchone()
     last_checked = refresh_row[0] if refresh_row and refresh_row[0] else None
     return {
