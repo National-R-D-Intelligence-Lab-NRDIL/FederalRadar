@@ -11,9 +11,23 @@ GRANTS FILTERING
 
 DATA / SOURCES
 --------------
-[ ] DHS grants (all fiscal years 2019-2026)
+[ ] DHS grants (FY2020-2026)
+    - Only 159 records loaded (FY2019 only)
     - Skipped for MVP due to USASpending bulk download taking 20+ minutes per year
     - Run as a one-time overnight job when ready
+
+[ ] Grants.gov opportunity feed — the "radar" in Federal Radar
+    - Forward-looking alerts on upcoming solicitations
+    - Different data type entirely (opportunities, not awards)
+    - Would answer: "What's open for submission right now?"
+
+[ ] Subaward data
+    - Not available in USASpending bulk download
+    - Would require separate API or FSRS data source
+
+[ ] Private foundation grants (Phase 3)
+    - Not in federal systems — requires separate data sources
+    - Foundations like NSF-adjacent orgs, Sloan, Mellon, etc.
 
 [x] NIH deduplication — COMPLETED 2026-05-26
     - NIH records grouped by core_project_num via scripts/nih_deduplicate.py
@@ -22,4 +36,28 @@ DATA / SOURCES
     - fiscal_year = original award year (earliest transaction)
     - All three sources (NSF, NIH, USASpending) now consistently store total award value
     - Total NIH funding preserved: $223.135B before and after (validated)
+
+[x] HHS (non-NIH) full load — COMPLETED 2026-06-04
+    - 12,248 records, $37.6B (HRSA, CDC, SAMHSA, ACF)
+    - Filtered to exclude NIH sub-agency to avoid double-counting
+
+[x] ED non-research filter — COMPLETED 2026-06-04
+    - 35 CFDA codes excluded (HEERF/CARES $73B + formula grants $40B)
+    - ED reduced from 74,901 records / $126.9B to 8,266 / $13.8B (research only)
+    - Applied at query time via _ed_exclusion_clause() — raw data preserved
+
+UI / POLISH
+-----------
+[ ] Data governance disclaimer and freshness bar on every page
+    - Show data-as-of date, record counts, source attribution
+    - Professional polish for production deployment
+
+[ ] High-quality PDF export
+    - Current: fpdf2 + kaleido (PNG raster, slow)
+    - Target: WeasyPrint + SVG vector charts
+    - HTML templating replaces cell-by-cell layout
+
+[ ] Trend/history view
+    - Single program x institution FY-by-FY deep dive
+    - Drill-down from gap table or action dashboard
 

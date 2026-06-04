@@ -1,6 +1,6 @@
 # Federal Radar — Technical Context & Decision Log
 
-**Last updated:** 2026-05-29 (evening)
+**Last updated:** 2026-06-04
 **Purpose:** Single source of truth for every significant technical decision made during
 development. Anyone picking up this project — new developer, stakeholder, or future self —
 should be able to read this and understand not just what we built, but why.
@@ -20,24 +20,26 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 - **UI:** Streamlit (`app/Home.py`) — single-page competitive gap analysis
 - **Deployment:** Railway (APScheduler daily refresh)
 
-### Current DB State (as of 2026-05-28)
-410,797 records · $503.17B · FY2019–2026 · 12 sources · 19,433 institutions (UEI-deduped)
+### Current DB State (as of 2026-06-04)
+423,756 records · $541B · FY2019–2026 · 13 sources · 19,433 institutions (UEI-deduped)
 
 | Source | Records | Funding | Complete? |
 |--------|---------|---------|-----------|
-| NIH | 156,439 | $223.1B | Yes (deduplicated by core project) |
-| NSF | 83,845 | $50.0B | Yes |
-| ED | 74,901 | $126.9B | Yes (includes formula/relief grants) |
+| NIH | 156,908 | $223.5B | Yes (deduplicated by core project) |
+| NSF | 84,077 | $50.1B | Yes |
+| ED | 74,901 (8,266 after filter) | $126.9B ($13.8B research-only) | Yes — non-research excluded at query time |
 | USDA | 27,276 | $18.4B | Yes |
 | DOD | 26,408 | $31.7B | Yes |
 | NASA | 17,424 | $10.6B | Yes |
+| HHS (non-NIH) | 12,248 | $37.6B | Yes (HRSA, CDC, SAMHSA, ACF) |
 | DOE | 10,395 | $24.4B | Yes |
-| Commerce | 6,749 | $11.6B | Yes |
+| Commerce | 6,749 | $11.5B | Yes |
 | DOT | 2,912 | $3.4B | Yes |
 | NEH | 2,703 | $0.4B | Yes |
 | EPA | 1,595 | $2.5B | Yes |
-| DHS | 150 | $0.3B | FY2019 only — slow download |
-| HHS (non-NIH) | — | — | Not loaded — slow download |
+| DHS | 159 | $0.3B | FY2019 only — slow download |
+
+**ED filtering:** 35 non-research CFDA codes (HEERF/CARES Act + TRIO/Impact Aid/Title III formula grants) are excluded at query time via `_ed_exclusion_clause()`. Raw data preserved in DB.
 
 ### Key Files
 | File | Purpose |
@@ -46,7 +48,9 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 | `app/Home.py` | Streamlit UI — competitive gap analysis (main page) |
 | `app/pages/1_Portfolio_Risk.py` | Portfolio Risk — agency concentration, what-if, peer HHI |
 | `app/pages/2_Expiring_Awards.py` | Expiring Awards — funding cliff, expiring awards table |
-| `app/queries.py` | All DB queries with 1-hour cache; peer config constants |
+| `app/pages/3_Action_Dashboard.py` | Action Dashboard — cross-agency YTD, missed opportunities, lapsed capacity |
+| `app/pages/4_Data_Dictionary.py` | Data Dictionary — agency abbreviations, field definitions, peer sets |
+| `app/queries.py` | All DB queries with 1-hour cache; peer config constants; ED exclusion filter |
 | `app/pdf_export.py` | PDF report generator (fpdf2 + kaleido) — tables, charts, PI breakdown |
 | `scripts/usaspending_api_fetcher.py` | USASpending bulk download + load (ED, DOT, NEH, DOD, etc.) |
 | `scripts/nih_api_fetcher.py` | NIH RePORTER API fetcher |
@@ -57,35 +61,42 @@ Federal Radar is a grants intelligence tool for university research offices (VPR
 | `scheduler.py` | APScheduler — daily NSF + NIH refresh on Railway |
 
 ### What's Done
-- [x] Data pipeline: NSF, NIH, DOD, USDA, NASA, DOE, Commerce, EPA, ED, DOT, NEH (410K records)
+- [x] Data pipeline: NSF, NIH, DOD, USDA, NASA, DOE, Commerce, EPA, ED, DOT, NEH, DHS, HHS (423K records, 13 agencies)
 - [x] NIH deduplication (453K → 156K rows, funding preserved)
+- [x] HHS (non-NIH) full load — 12,248 records, $37.6B
+- [x] ED non-research filter — 35 CFDA codes excluded at query time ($126.9B → $13.8B research-only)
 - [x] UEI enrichment pipeline (all 3 sources — extracted from raw_json)
 - [x] Institutions reference table (19,433 rows, UEI as key, canonical names)
 - [x] Peer institution configuration (25 UEIs flagged across Texas + National peers)
 - [x] Streamlit competitive gap analysis dashboard (Home.py)
 - [x] Portfolio Risk page — agency concentration donut, what-if scenario, peer HHI table, agency trend
 - [x] Expiring Awards page — scorecard, quarterly funding cliff chart, awards table with CSV, agency breakdown
+- [x] Action Dashboard — cross-agency YTD money movement, missed opportunities, lapsed capacity
+- [x] Data Dictionary — agency abbreviations, field definitions, planned agencies, peer sets
 - [x] PDF export — full-page report with tables + embedded bar chart, heatmap, Sankey (kaleido + fpdf2)
 - [x] Upsert logic: fiscal_year never overwritten, awd_amount takes MAX
 - [x] Crash-safe .done sentinel system for downloads
 - [x] Daily refresh scheduler (NSF + NIH) deployed on Railway
 
 ### What's Next (in order)
-1. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
-2. **Trend/history view** — FY-by-FY chart for a single program × institution
-3. **DHS + HHS full load** — overnight jobs for slow-download agencies
+1. **Data governance footer** — freshness bar + disclaimer on every page
+2. **Grants.gov opportunity feed** — forward-looking alerts (the "radar" part)
+3. **DHS full load (FY2020-2026)** — overnight job for slow-download agency
+4. **Trend/history view** — FY-by-FY chart for a single program × institution
 
 ### Streamlit App
 - Run with: `streamlit run app/Home.py` (from the `app/` directory)
-- 3 pages via Streamlit multipage: Home (gap analysis), Portfolio Risk, Expiring Awards
-- Home: agency/program selector → scorecard → gap table → bar chart → heatmap → Sankey
+- 5 pages via Streamlit multipage: Home (gap analysis), Portfolio Risk, Expiring Awards, Action Dashboard, Data Dictionary
+- Home: agency/program selector → scorecard → gap table → bar chart → heatmap → Sankey → PDF export
 - Portfolio Risk: agency concentration donut → what-if cut scenario → peer HHI table → agency trend
 - Expiring Awards: scorecard → quarterly cliff chart → sortable awards table (CSV) → agency breakdown
+- Action Dashboard: cross-agency YTD bar chart → UNT comparison table → missed opportunities → lapsed capacity
+- Data Dictionary: agency abbreviations, field definitions, planned agencies, peer sets
 - Peers always visible — gap analysis is the primary interaction
 
 ### Critical Gotchas
 - **NIH `awd_amount`** = total project value (post-dedup sum of annual budgets) — comparable to NSF/USASpending
-- **ED `awd_amount`** is large ($90B+ in 2020/2021) due to COVID CARES Act relief — not pure research
+- **ED `awd_amount`** — raw DB has $126.9B but 89% is non-research (HEERF/CARES $73B + formula grants $40B). All queries exclude 35 non-research CFDA codes via `_ed_exclusion_clause()` → $13.8B research-only. Raw data preserved.
 - **USASpending**: always use `total_obligated_amount`, never sum `federal_action_obligation`
 - **HHS bulk download** excludes NIH (filtered by `awarding_sub_agency_name`) to avoid double-counting
 - **`fiscal_year`** = federal FY (Oct 1 – Sep 30); Oct 2022 action → FY2023
@@ -125,7 +136,7 @@ Data Sources
     ▼
 SQLite DB (federal_awards.db)
     │
-    ├── awards table (unified, all sources, 410K rows)
+    ├── awards table (unified, all sources, 423K rows)
     └── institutions table (UEI reference, 19,433 rows)
     │
     ▼
@@ -706,7 +717,9 @@ Federal Radar/
 │   ├── Home.py                        Streamlit — competitive gap analysis
 │   ├── pages/
 │   │   ├── 1_Portfolio_Risk.py        Agency concentration, what-if, peer HHI
-│   │   └── 2_Expiring_Awards.py       Funding cliff, expiring awards table
+│   │   ├── 2_Expiring_Awards.py       Funding cliff, expiring awards table
+│   │   ├── 3_Action_Dashboard.py      Cross-agency YTD, missed opportunities, lapsed
+│   │   └── 4_Data_Dictionary.py       Agency abbreviations, field defs, peer sets
 │   ├── pdf_export.py                  PDF report generator (fpdf2 + kaleido)
 │   └── queries.py                     All DB queries, peer config, constants
 ├── scripts/
@@ -737,11 +750,14 @@ Federal Radar/
 
 | Gap | Reason | Plan |
 |---|---|---|
-| DHS FY2020–2026 | Slow download (~20+ min/year) | Overnight job post-MVP |
-| HHS (non-NIH) FY2020–2026 | Same slow download issue | Overnight job post-MVP |
+| DHS FY2020–2026 | Slow download (~20+ min/year); only 159 records (FY2019) loaded | Overnight job |
 | Grant opportunities (solicitations) | Different data type entirely | Grants.gov API, Phase 2 |
 | Subaward data | Not in bulk download | Future |
 | Private foundation grants | Not in federal systems | Phase 3 |
+
+**Resolved gaps:**
+- ~~HHS (non-NIH)~~ — Loaded 2026-06-04: 12,248 records, $37.6B
+- ~~ED non-research inflation~~ — 35 CFDA codes excluded at query time (2026-06-04)
 
 ---
 
