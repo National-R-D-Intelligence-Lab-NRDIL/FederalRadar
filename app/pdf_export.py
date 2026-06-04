@@ -30,7 +30,10 @@ _STEEL  = (74, 98, 119)     # table sub-header
 # ---------------------------------------------------------------------------
 
 def _trend_text(t: str) -> str:
-    return {"↑": "Growing", "↓": "Declining", "→": "Flat"}.get(t, "-")
+    return {
+        "↑": "Growing", "↓": "Declining", "→": "Flat",
+        "—": "No Data", "-": "No Data",
+    }.get(t, t)
 
 
 def _clean_md(text: str) -> str:
@@ -145,6 +148,7 @@ def generate_gap_report(
     headline: str,
     gap_df: pd.DataFrame,
     peer_funding: pd.DataFrame,
+    fy_peer_funding: pd.DataFrame | None = None,
     pi_df: pd.DataFrame | None = None,
     charts: list[tuple[str, bytes]] | None = None,
 ) -> bytes:
@@ -258,27 +262,57 @@ def generate_gap_report(
     if not peer_funding.empty:
         _section_header(pdf, "Peer Funding Comparison")
 
-        pw = [115, 40, 35]
-        ph = ["Institution", "Funding ($M)", "Rank"]
-        _table_header(pdf, ph, pw)
-
         sorted_df = (
             peer_funding
             .sort_values("funding_m", ascending=False)
             .reset_index(drop=True)
         )
-        for i, row in sorted_df.iterrows():
-            _check_page(pdf, ph, pw)
 
-            is_unt = row["institution"] == MY_INSTITUTION
-            pdf.set_fill_color(*(_YELLOW if is_unt else (_ALT if i % 2 == 0 else _WHITE)))
-            pdf.set_font("Helvetica", "B" if is_unt else "", 8)
-            pdf.set_text_color(*_NAVY if is_unt else (30, 30, 30))
+        if fy_peer_funding is not None and not fy_peer_funding.empty:
+            # Wide table: Institution | FY2019 | … | FY202x | Total
+            fy_cols = [c for c in fy_peer_funding.columns if c != "institution"]
+            # Drop FY columns where every institution has $0
+            fy_cols = [c for c in fy_cols if fy_peer_funding[c].sum() > 0]
+            fy_cols = sorted(fy_cols)[:7]   # cap at 7 to fit page width
+            n_fy = len(fy_cols)
+            inst_w = 52
+            fy_w   = 15
+            tot_w  = 20
+            pw = [inst_w] + [fy_w] * n_fy + [tot_w]
+            ph = ["Institution"] + [f"FY{int(c)}" for c in fy_cols] + ["Total ($M)"]
+            _table_header(pdf, ph, pw)
 
-            pdf.cell(pw[0], 6, _safe(str(row["institution"])[:58]), border=1, align="L", fill=True)
-            pdf.cell(pw[1], 6, f"${row['funding_m']:.1f}M", border=1, align="C", fill=True)
-            pdf.cell(pw[2], 6, f"#{i + 1}", border=1, align="C", fill=True)
-            pdf.ln(6)
+            fy_map = fy_peer_funding.set_index("institution")
+            for i, row in sorted_df.iterrows():
+                _check_page(pdf, ph, pw)
+                inst = row["institution"]
+                is_unt = inst == MY_INSTITUTION
+                pdf.set_fill_color(*(_YELLOW if is_unt else (_ALT if i % 2 == 0 else _WHITE)))
+                pdf.set_font("Helvetica", "B" if is_unt else "", 8)
+                pdf.set_text_color(*(_NAVY if is_unt else (30, 30, 30)))
+
+                pdf.cell(pw[0], 6, _safe(str(inst)[:28]), border=1, align="L", fill=True)
+                fy_row = fy_map.loc[inst] if inst in fy_map.index else None
+                for j, fy in enumerate(fy_cols):
+                    val = float(fy_row[fy]) if fy_row is not None and fy in fy_row.index else 0.0
+                    pdf.cell(pw[1 + j], 6, f"${val:.1f}M", border=1, align="C", fill=True)
+                pdf.cell(pw[-1], 6, f"${row['funding_m']:.1f}M", border=1, align="C", fill=True)
+                pdf.ln(6)
+        else:
+            # Fallback: simple Institution | Funding | Rank table
+            pw = [115, 40, 35]
+            ph = ["Institution", "Funding ($M)", "Rank"]
+            _table_header(pdf, ph, pw)
+            for i, row in sorted_df.iterrows():
+                _check_page(pdf, ph, pw)
+                is_unt = row["institution"] == MY_INSTITUTION
+                pdf.set_fill_color(*(_YELLOW if is_unt else (_ALT if i % 2 == 0 else _WHITE)))
+                pdf.set_font("Helvetica", "B" if is_unt else "", 8)
+                pdf.set_text_color(*(_NAVY if is_unt else (30, 30, 30)))
+                pdf.cell(pw[0], 6, _safe(str(row["institution"])[:58]), border=1, align="L", fill=True)
+                pdf.cell(pw[1], 6, f"${row['funding_m']:.1f}M", border=1, align="C", fill=True)
+                pdf.cell(pw[2], 6, f"#{i + 1}", border=1, align="C", fill=True)
+                pdf.ln(6)
 
         pdf.ln(6)
 

@@ -32,6 +32,7 @@ CURRENT_AGENCIES = {
     "commerce": ("Department of Commerce", "USAspending API", "NIST, NOAA, EDA research grants"),
     "dhs":      ("Department of Homeland Security", "USAspending API", "Homeland security research, DHS S&T"),
     "dot":      ("Department of Transportation", "USAspending API", "Transportation research, UTC grants"),
+    "hhs":      ("Department of Health & Human Services (non-NIH)", "USAspending API", "HRSA, CDC, SAMHSA, ACF — public health & social services research"),
 }
 
 df_fresh = get_data_freshness()
@@ -72,7 +73,6 @@ PLANNED_HIGH = {
     "nea":  ("National Endowment for the Arts", "USAspending API", "Arts funding, creative research", "High"),
     "va":   ("Department of Veterans Affairs", "USAspending API", "VA research, clinical trials, health services", "High"),
     "doi":  ("Department of the Interior", "USAspending API", "USGS, wildlife & land management research", "High"),
-    "hhs":  ("HHS (non-NIH)", "USAspending API", "HRSA, CDC, SAMHSA, ACF — public health & social services research", "High"),
     "doj":  ("Department of Justice", "USAspending API", "NIJ research grants, criminal justice studies", "High"),
     "dol":  ("Department of Labor", "USAspending API", "Workforce research, ETA grants, BLS studies", "High"),
 }

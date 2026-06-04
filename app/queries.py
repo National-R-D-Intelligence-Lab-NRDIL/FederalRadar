@@ -1393,7 +1393,13 @@ def get_data_freshness() -> pd.DataFrame:
                    ROW_NUMBER() OVER (PARTITION BY source ORDER BY finished_at DESC) AS rn
             FROM refresh_log
             WHERE status = 'success'
-        ) r ON r.source = a.source AND r.rn = 1
+        ) r ON r.rn = 1
+          AND (
+              -- NSF and NIH log under their own name
+              (a.source IN ('nsf', 'nih') AND r.source = a.source)
+              -- All other sources are loaded via USASpending bulk run
+              OR (a.source NOT IN ('nsf', 'nih') AND r.source = 'usaspending')
+          )
         ORDER BY a.source
     """
     with _conn() as conn:
