@@ -230,6 +230,133 @@ def get_nih_activity_codes(institute: str | None = None) -> list[str]:
     return [r[0] for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Institution picker — HERD/IPEDS institution list
+# ---------------------------------------------------------------------------
+
+CARNEGIE_LABELS = {
+    "15": "R1 — Doctoral: Very High Research",
+    "16": "R2 — Doctoral: High Research",
+    "17": "D/PU — Doctoral/Professional",
+    "18": "M1 — Master's: Larger Programs",
+    "19": "M2 — Master's: Medium Programs",
+    "20": "M3 — Master's: Small Programs",
+}
+
+CARNEGIE_SHORT = {
+    "15": "R1", "16": "R2", "17": "D/PU",
+    "18": "M1", "19": "M2", "20": "M3",
+}
+
+
+@st.cache_data(ttl=3600)
+def get_herd_institutions(
+    state: str | None = None,
+    carnegie_codes: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    """
+    All HERD-matched institutions for the institution picker dropdown.
+
+    Returns DataFrame with columns:
+        unitid, ipeds_name, state, carnegie, carnegie_label,
+        awards_uei, awards_count, awards_total_m
+
+    Only includes institutions with a matched awards_uei (95.6% of the
+    1,053 IPEDS research institutions). Sorted alphabetically by name.
+
+    Args:
+        state: two-letter state abbreviation to filter (None = all states)
+        carnegie_codes: tuple of C18BASIC codes to include, e.g. ('15','16')
+                        None = all codes (15–20)
+    """
+    clauses = ["awards_uei IS NOT NULL"]
+    params: list = []
+
+    if state:
+        clauses.append("state = ?")
+        params.append(state)
+
+    if carnegie_codes:
+        placeholders = ",".join("?" * len(carnegie_codes))
+        clauses.append(f"carnegie IN ({placeholders})")
+        params.extend(carnegie_codes)
+
+    sql = f"""
+        SELECT unitid, ipeds_name, state, carnegie,
+               awards_uei, awards_name, awards_count, awards_total_m
+        FROM herd_institutions
+        WHERE {" AND ".join(clauses)}
+        ORDER BY ipeds_name
+    """
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+
+    df["carnegie_label"] = df["carnegie"].map(CARNEGIE_SHORT).fillna(df["carnegie"])
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_herd_states() -> list[str]:
+    """Sorted list of state abbreviations that have matched HERD institutions."""
+    with _conn() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT state FROM herd_institutions
+               WHERE awards_uei IS NOT NULL AND state IS NOT NULL
+               ORDER BY state"""
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+@st.cache_data(ttl=3600)
+def get_institution_summary(awards_uei: str) -> dict:
+    """
+    Key stats for one institution — used to populate a summary card
+    when the user selects an institution.
+
+    Returns dict with: ipeds_name, state, carnegie_label, awards_uei,
+    total_awards, total_funding_m, first_fy, last_fy, top_agency
+    """
+    with _conn() as conn:
+        # Basic identity from herd_institutions
+        meta = conn.execute(
+            """SELECT ipeds_name, state, carnegie
+               FROM herd_institutions WHERE awards_uei = ?""",
+            (awards_uei,),
+        ).fetchone()
+
+        if not meta:
+            return {}
+
+        ipeds_name, state, carnegie = meta
+
+        # Award stats from the awards table
+        stats = conn.execute(
+            """SELECT COUNT(*), ROUND(SUM(awd_amount)/1e6, 1),
+                      MIN(fiscal_year), MAX(fiscal_year)
+               FROM awards WHERE inst_uei = ?""",
+            (awards_uei,),
+        ).fetchone()
+
+        top_agency = conn.execute(
+            """SELECT source, COUNT(*) as n
+               FROM awards WHERE inst_uei = ?
+               GROUP BY source ORDER BY n DESC LIMIT 1""",
+            (awards_uei,),
+        ).fetchone()
+
+    return {
+        "ipeds_name":     ipeds_name,
+        "state":          state,
+        "carnegie_label": CARNEGIE_LABELS.get(carnegie, carnegie),
+        "awards_uei":     awards_uei,
+        "total_awards":   stats[0] or 0,
+        "total_funding_m": stats[1] or 0.0,
+        "first_fy":       stats[2],
+        "last_fy":        stats[3],
+        "top_agency":     top_agency[0] if top_agency else None,
+    }
+
+
 @st.cache_data(ttl=3600)
 def get_cfda_programs(agency: str) -> list[tuple[str, str]]:
     """Returns (opportunity_number, cfda_title) for a USASpending agency."""
@@ -1457,6 +1584,215 @@ def get_lapsed_programs(my_ueis: tuple[str, ...]) -> pd.DataFrame:
         ORDER BY h.past_funding_m DESC
     """
     params = list(my_ueis) + ed_params + list(my_ueis) + ed_params_r
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_peer_opportunity_gaps(
+    my_ueis: tuple[str, ...],
+    peer_ueis: tuple[str, ...],
+    status_filter: tuple[str, ...] = ("posted", "forecasted"),
+    lookback_fy: int = 2023,
+) -> pd.DataFrame:
+    """Open/forecasted NOFOs where peers won FY{lookback_fy}+ awards and UNT has no
+    recent awards in the same program.
+
+    Two join paths:
+      - NIH: awards.opportunity_number = opportunities.opportunity_number (PA/RFA numbers)
+      - USASpending: awards.opportunity_number = opportunity_cfdas.cfda_number (CFDA codes)
+
+    Returns one row per opportunity with peer aggregation columns.
+    """
+    if not my_ueis or not peer_ueis or not status_filter:
+        return pd.DataFrame()
+
+    my_ph   = ",".join("?" * len(my_ueis))
+    peer_ph = ",".join("?" * len(peer_ueis))
+    stat_ph = ",".join("?" * len(status_filter))
+
+    sql = f"""
+    WITH peer_opps AS (
+        -- NIH: direct opportunity_number match (PA-xx-xxx / RFA-xx-xxx)
+        SELECT o.opportunity_id,
+               a.inst_canonical_name,
+               a.awd_amount,
+               a.awd_id
+        FROM awards a
+        JOIN opportunities o ON a.opportunity_number = o.opportunity_number
+        WHERE a.source = 'nih'
+          AND a.fiscal_year >= ?
+          AND a.inst_uei IN ({peer_ph})
+          AND o.derived_status IN ({stat_ph})
+        UNION ALL
+        -- USASpending: CFDA-number join (11.417, 93.310, …)
+        SELECT oc.opportunity_id,
+               a.inst_canonical_name,
+               a.awd_amount,
+               a.awd_id
+        FROM awards a
+        JOIN opportunity_cfdas oc ON a.opportunity_number = oc.cfda_number
+        JOIN opportunities o      ON oc.opportunity_id    = o.opportunity_id
+        WHERE a.source NOT IN ('nih', 'nsf')
+          AND a.fiscal_year >= ?
+          AND a.inst_uei IN ({peer_ph})
+          AND o.derived_status IN ({stat_ph})
+    ),
+    unt_opps AS (
+        -- Opportunity IDs where UNT has any FY{lookback_fy}+ award
+        SELECT DISTINCT o.opportunity_id
+        FROM awards a
+        JOIN opportunities o ON a.opportunity_number = o.opportunity_number
+        WHERE a.source = 'nih'
+          AND a.fiscal_year >= ?
+          AND a.inst_uei IN ({my_ph})
+        UNION
+        SELECT DISTINCT oc.opportunity_id
+        FROM awards a
+        JOIN opportunity_cfdas oc ON a.opportunity_number = oc.cfda_number
+        WHERE a.source NOT IN ('nih', 'nsf')
+          AND a.fiscal_year >= ?
+          AND a.inst_uei IN ({my_ph})
+    ),
+    gap_agg AS (
+        SELECT
+            p.opportunity_id,
+            COUNT(DISTINCT p.inst_canonical_name)    AS peer_inst_count,
+            COUNT(p.awd_id)                          AS peer_award_count,
+            ROUND(SUM(p.awd_amount) / 1e6, 1)        AS peer_total_m,
+            GROUP_CONCAT(DISTINCT p.inst_canonical_name) AS peer_names
+        FROM peer_opps p
+        WHERE p.opportunity_id NOT IN (SELECT opportunity_id FROM unt_opps)
+        GROUP BY p.opportunity_id
+    )
+    SELECT
+        o.opportunity_id,
+        o.opportunity_number,
+        o.opportunity_title,
+        o.agency_code,
+        o.agency_name,
+        o.derived_status,
+        o.close_date,
+        o.estimated_close_date,
+        o.award_ceiling,
+        o.expected_number_of_awards,
+        o.funding_instrument_type,
+        g.peer_inst_count,
+        g.peer_award_count,
+        g.peer_total_m,
+        g.peer_names
+    FROM gap_agg g
+    JOIN opportunities o ON g.opportunity_id = o.opportunity_id
+    ORDER BY
+        CASE o.derived_status WHEN 'posted' THEN 0 ELSE 1 END,
+        COALESCE(o.close_date, o.estimated_close_date, '9999-99-99') ASC,
+        g.peer_total_m DESC
+    """
+
+    params = (
+        [lookback_fy] + list(peer_ueis) + list(status_filter) +
+        [lookback_fy] + list(peer_ueis) + list(status_filter) +
+        [lookback_fy] + list(my_ueis) +
+        [lookback_fy] + list(my_ueis)
+    )
+
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def get_unt_open_revisits(
+    my_ueis: tuple[str, ...],
+    status_filter: tuple[str, ...] = ("posted", "forecasted"),
+) -> pd.DataFrame:
+    """Open/forecasted NOFOs in programs where UNT has any historical award (FY2019+).
+
+    Two join paths:
+      - Non-NIH/NSF: awards.opportunity_number (CFDA) → opportunity_cfdas → opportunities
+      - NIH: awards.opportunity_number (PA/RFA) → opportunities.opportunity_number
+
+    Returns one row per opportunity with UNT history columns.
+    """
+    if not my_ueis or not status_filter:
+        return pd.DataFrame()
+
+    my_ph   = ",".join("?" * len(my_ueis))
+    stat_ph = ",".join("?" * len(status_filter))
+
+    sql = f"""
+    WITH unt_cfdas AS (
+        SELECT a.opportunity_number                  AS cfda_number,
+               COUNT(a.awd_id)                       AS unt_award_count,
+               ROUND(SUM(a.awd_amount) / 1e6, 1)     AS unt_total_m,
+               MAX(a.fiscal_year)                    AS unt_last_fy
+        FROM awards a
+        WHERE a.inst_uei IN ({my_ph})
+          AND a.source NOT IN ('nih', 'nsf')
+          AND a.opportunity_number IS NOT NULL
+        GROUP BY a.opportunity_number
+    ),
+    unt_nih AS (
+        SELECT a.opportunity_number,
+               COUNT(a.awd_id)                       AS unt_award_count,
+               ROUND(SUM(a.awd_amount) / 1e6, 1)     AS unt_total_m,
+               MAX(a.fiscal_year)                    AS unt_last_fy
+        FROM awards a
+        WHERE a.inst_uei IN ({my_ph})
+          AND a.source = 'nih'
+          AND a.opportunity_number IS NOT NULL
+        GROUP BY a.opportunity_number
+    )
+    SELECT * FROM (
+    SELECT o.opportunity_id,
+           o.opportunity_number,
+           o.opportunity_title,
+           o.agency_code,
+           o.agency_name,
+           o.derived_status,
+           o.close_date,
+           o.estimated_close_date,
+           o.award_ceiling,
+           o.expected_number_of_awards,
+           uc.unt_award_count,
+           uc.unt_total_m,
+           uc.unt_last_fy
+    FROM unt_cfdas uc
+    JOIN opportunity_cfdas ocf ON uc.cfda_number      = ocf.cfda_number
+    JOIN opportunities o       ON ocf.opportunity_id  = o.opportunity_id
+    WHERE o.derived_status IN ({stat_ph})
+
+    UNION
+
+    SELECT o.opportunity_id,
+           o.opportunity_number,
+           o.opportunity_title,
+           o.agency_code,
+           o.agency_name,
+           o.derived_status,
+           o.close_date,
+           o.estimated_close_date,
+           o.award_ceiling,
+           o.expected_number_of_awards,
+           un.unt_award_count,
+           un.unt_total_m,
+           un.unt_last_fy
+    FROM unt_nih un
+    JOIN opportunities o ON un.opportunity_number = o.opportunity_number
+    WHERE o.derived_status IN ({stat_ph})
+    )
+    ORDER BY
+        CASE derived_status WHEN 'posted' THEN 0 ELSE 1 END,
+        unt_last_fy DESC,
+        COALESCE(close_date, estimated_close_date, '9999-99-99') ASC
+    """
+
+    params = (
+        list(my_ueis) +          # unt_cfdas
+        list(my_ueis) +          # unt_nih
+        list(status_filter) +    # first SELECT WHERE
+        list(status_filter)      # second SELECT WHERE
+    )
+
     with _conn() as conn:
         return pd.read_sql_query(sql, conn, params=params)
 

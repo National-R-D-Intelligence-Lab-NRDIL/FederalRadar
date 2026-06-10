@@ -1,25 +1,28 @@
 FUTURE FEATURES
 ===============
 
-GRANTS FILTERING
-----------------
-[ ] "Currently active grants" filter
-    - Store period_of_performance_current_end_date in DB for all USASpending awards
-    - Add NSF expDate and NIH project_end_date equivalents
-    - Filter: show grants where end_date >= today
-    - Separate concept from fiscal_year (when awarded) vs active status (still running)
+INSTITUTION BENCHMARKING
+-------------------------
+[~] Any-institution benchmarking UI — IN PROGRESS
+    - herd_institutions table built (1,053 IPEDS research universities, 95.4% matched)
+    - Institution picker queries complete: get_herd_institutions(), get_herd_states(), get_institution_summary()
+    - App pages still hardcoded to UNT — wire picker into Home + other pages
+
+GRANTS.GOV PIPELINE
+--------------------
+[~] Grants.gov opportunity feed — IN PROGRESS
+    - fetch_grantsgov.py: downloads daily XML extract from AWS S3, parses to JSONL
+    - load_grantsgov.py: upserts into opportunities + opportunity_cfdas tables
+    - validate_grantsgov.py: spot-checks sample records against live API
+    - Page 5 (5_Open_Opportunities.py): peer gaps + UNT revisits UI built
+    - APScheduler integration not yet wired (manual run only)
 
 DATA / SOURCES
 --------------
-[ ] DHS grants (FY2020-2026)
+[ ] DHS grants FY2020-2026
     - Only 159 records loaded (FY2019 only)
     - Skipped for MVP due to USASpending bulk download taking 20+ minutes per year
     - Run as a one-time overnight job when ready
-
-[ ] Grants.gov opportunity feed — the "radar" in Federal Radar
-    - Forward-looking alerts on upcoming solicitations
-    - Different data type entirely (opportunities, not awards)
-    - Would answer: "What's open for submission right now?"
 
 [ ] Subaward data
     - Not available in USASpending bulk download
@@ -29,12 +32,31 @@ DATA / SOURCES
     - Not in federal systems — requires separate data sources
     - Foundations like NSF-adjacent orgs, Sloan, Mellon, etc.
 
+UI / POLISH
+-----------
+[ ] Data governance disclaimer and freshness bar on every page
+    - get_data_freshness() query already exists in queries.py
+    - Needs UI integration on all pages
+
+[ ] High-quality PDF export
+    - Current: fpdf2 + kaleido (PNG raster, slow)
+    - Target: WeasyPrint + SVG vector charts
+
+[ ] Trend/history view
+    - Single program x institution FY-by-FY deep dive
+    - Drill-down from gap table or action dashboard
+
+[ ] "Currently active grants" filter
+    - Store period_of_performance_current_end_date in DB for all USASpending awards
+    - Add NSF expDate and NIH project_end_date equivalents
+    - Filter: show grants where end_date >= today
+
+COMPLETED
+---------
 [x] NIH deduplication — COMPLETED 2026-05-26
     - NIH records grouped by core_project_num via scripts/nih_deduplicate.py
     - 453,631 raw rows -> 156,439 unique projects (65.5% reduction)
     - awd_amount = sum of all annual budget slices = true total award value
-    - fiscal_year = original award year (earliest transaction)
-    - All three sources (NSF, NIH, USASpending) now consistently store total award value
     - Total NIH funding preserved: $223.135B before and after (validated)
 
 [x] HHS (non-NIH) full load — COMPLETED 2026-06-04
@@ -46,18 +68,8 @@ DATA / SOURCES
     - ED reduced from 74,901 records / $126.9B to 8,266 / $13.8B (research only)
     - Applied at query time via _ed_exclusion_clause() — raw data preserved
 
-UI / POLISH
------------
-[ ] Data governance disclaimer and freshness bar on every page
-    - Show data-as-of date, record counts, source attribution
-    - Professional polish for production deployment
-
-[ ] High-quality PDF export
-    - Current: fpdf2 + kaleido (PNG raster, slow)
-    - Target: WeasyPrint + SVG vector charts
-    - HTML templating replaces cell-by-cell layout
-
-[ ] Trend/history view
-    - Single program x institution FY-by-FY deep dive
-    - Drill-down from gap table or action dashboard
-
+[x] HERD institution crosswalk — COMPLETED 2026-06-10
+    - 1,053 IPEDS Carnegie 15-20 institutions mapped to awards DB UEIs
+    - 95.4% match rate; 100% R1 and R2 coverage
+    - Manual overrides for 46 institutions with different SAM.gov filing entities
+    - Loaded into herd_institutions table in DB

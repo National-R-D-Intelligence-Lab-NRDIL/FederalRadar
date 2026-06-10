@@ -154,13 +154,99 @@ CREATE_INDEXES_SQL = [
 ]
 
 
+CREATE_HERD_INSTITUTIONS_SQL = """
+CREATE TABLE IF NOT EXISTS herd_institutions (
+    unitid          TEXT PRIMARY KEY,
+    ipeds_name      TEXT NOT NULL,
+    state           TEXT,
+    carnegie        TEXT,
+    ipeds_uei       TEXT,
+    awards_uei      TEXT,
+    awards_name     TEXT,
+    awards_count    INTEGER DEFAULT 0,
+    awards_total_m  REAL DEFAULT 0.0,
+    match_type      TEXT,
+    note            TEXT,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+CREATE_HERD_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_herd_awards_uei ON herd_institutions(awards_uei);",
+    "CREATE INDEX IF NOT EXISTS idx_herd_state      ON herd_institutions(state);",
+    "CREATE INDEX IF NOT EXISTS idx_herd_carnegie   ON herd_institutions(carnegie);",
+]
+
+CREATE_OPPORTUNITIES_SQL = """
+CREATE TABLE IF NOT EXISTS opportunities (
+    opportunity_id              TEXT PRIMARY KEY,
+    opportunity_number          TEXT,
+    opportunity_title           TEXT NOT NULL,
+    agency_code                 TEXT,
+    agency_name                 TEXT,
+    record_type                 TEXT NOT NULL,
+    derived_status              TEXT NOT NULL,
+    opportunity_category        TEXT,
+    funding_instrument_type     TEXT,
+    category_of_funding_activity TEXT,
+    eligible_applicants         TEXT,
+    post_date                   TEXT,
+    close_date                  TEXT,
+    archive_date                TEXT,
+    last_updated_date           TEXT,
+    fiscal_year                 INTEGER,
+    award_ceiling               REAL,
+    award_floor                 REAL,
+    estimated_total_funding     REAL,
+    expected_number_of_awards   INTEGER,
+    cost_sharing_required       INTEGER,
+    description                 TEXT,
+    estimated_post_date         TEXT,
+    estimated_close_date        TEXT,
+    estimated_award_date        TEXT,
+    estimated_project_start     TEXT,
+    grantor_contact_email       TEXT,
+    grantor_contact_name        TEXT,
+    extracted_date              TEXT NOT NULL,
+    raw_json                    TEXT NOT NULL,
+    created_at                  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+CREATE_OPPORTUNITY_CFDAS_SQL = """
+CREATE TABLE IF NOT EXISTS opportunity_cfdas (
+    opportunity_id  TEXT NOT NULL,
+    cfda_number     TEXT NOT NULL,
+    PRIMARY KEY (opportunity_id, cfda_number)
+);
+"""
+
+CREATE_OPPORTUNITIES_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_opp_status_fy      ON opportunities(derived_status, fiscal_year);",
+    "CREATE INDEX IF NOT EXISTS idx_opp_agency_fy      ON opportunities(agency_code, fiscal_year);",
+    "CREATE INDEX IF NOT EXISTS idx_opp_instrument     ON opportunities(funding_instrument_type);",
+    "CREATE INDEX IF NOT EXISTS idx_opp_number         ON opportunities(opportunity_number);",
+    "CREATE INDEX IF NOT EXISTS idx_opp_extracted_date ON opportunities(extracted_date);",
+    "CREATE INDEX IF NOT EXISTS idx_opp_cfda_number    ON opportunity_cfdas(cfda_number);",
+]
+
+
 def init_db():
     with _connect() as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute(CREATE_TABLE_SQL)
         conn.execute(CREATE_REFRESH_LOG_SQL)
+        conn.execute(CREATE_HERD_INSTITUTIONS_SQL)
+        conn.execute(CREATE_OPPORTUNITIES_SQL)
+        conn.execute(CREATE_OPPORTUNITY_CFDAS_SQL)
         for idx_sql in CREATE_INDEXES_SQL:
+            conn.execute(idx_sql)
+        for idx_sql in CREATE_HERD_INDEXES_SQL:
+            conn.execute(idx_sql)
+        for idx_sql in CREATE_OPPORTUNITIES_INDEXES_SQL:
             conn.execute(idx_sql)
         conn.commit()
 
