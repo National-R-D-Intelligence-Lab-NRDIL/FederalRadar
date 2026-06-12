@@ -16,6 +16,20 @@ import streamlit as st
 from pdf_export import generate_gap_report
 
 
+def _short_label(name: str) -> str:
+    """Derive a compact display label from a full institution name."""
+    s = name
+    for prefix in ("The University of ", "University of ", "University at ", "College of "):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    for suffix in (" University", " College", " Institute of Technology", " State University"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    return s[:20] + ("…" if len(s) > 20 else "")
+
+
 def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
     """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure.
     Clones the figure and widens margins so labels are not clipped in the
@@ -33,7 +47,6 @@ def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
 from queries import (
     ED_EXCLUSION_NOTE,
     ED_NON_RESEARCH_CFDAS,
-    MY_INSTITUTION,
     NSF_DIR_NAMES,
     NSF_DIV_NAMES,
     PEER_SHORT,
@@ -41,6 +54,8 @@ from queries import (
     get_field_wide_stats,
     get_fy_bounds,
     get_heatmap_data,
+    get_herd_institutions,
+    get_herd_states,
     get_scoped_pis,
     get_my_ueis,
     get_nih_institutes,
@@ -65,7 +80,37 @@ st.set_page_config(
 
 with st.sidebar:
     st.markdown("## Federal Radar")
-    st.caption(MY_INSTITUTION)
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Institution picker
+    # ------------------------------------------------------------------
+    _states = ["(All)"] + get_herd_states()
+    _state_pick = st.selectbox("State", _states, key="picker_state")
+    _state_val = _state_pick if _state_pick != "(All)" else None
+
+    _inst_df = get_herd_institutions(state=_state_val)
+    _opt_labels = [f"{row.ipeds_name} ({row.state})" for row in _inst_df.itertuples()]
+    _opt_ueis   = _inst_df["awards_uei"].tolist()
+    _opt_names  = _inst_df["awards_name"].tolist()
+    _opt_ipeds  = _inst_df["ipeds_name"].tolist()
+
+    _my_default_ueis = get_my_ueis()
+    _default_idx = next(
+        (i for i, u in enumerate(_opt_ueis) if u in _my_default_ueis), 0
+    )
+    _inst_idx = st.selectbox(
+        "Institution",
+        range(len(_opt_labels)),
+        format_func=lambda i: _opt_labels[i],
+        index=_default_idx,
+        key="picker_inst",
+    )
+    selected_uei  = _opt_ueis[_inst_idx]
+    my_inst_name  = _opt_names[_inst_idx] or _opt_ipeds[_inst_idx]
+    my_ipeds_name = _opt_ipeds[_inst_idx]
+    my_col_label  = _short_label(my_ipeds_name)
+
     st.divider()
 
     all_agencies = get_agencies()
@@ -129,7 +174,8 @@ with st.sidebar:
 # Load data
 # ---------------------------------------------------------------------------
 
-my_ueis   = tuple(get_my_ueis())
+_all_my_ueis = tuple(get_my_ueis())
+my_ueis      = _all_my_ueis if selected_uei in _all_my_ueis else (selected_uei,)
 peer_items = get_peer_institutions(peer_set)
 peer_ueis  = tuple(uei for _, uei in peer_items)
 
@@ -205,24 +251,24 @@ abbr_to_name = (
     .to_dict()
 )
 
-# Ensure UNT column exists
-if MY_INSTITUTION not in pivot_n.columns:
-    pivot_n[MY_INSTITUTION] = 0
-    pivot_m[MY_INSTITUTION] = 0.0
+# Ensure my institution column exists
+if my_inst_name not in pivot_n.columns:
+    pivot_n[my_inst_name] = 0
+    pivot_m[my_inst_name] = 0.0
 
-peer_cols = [c for c in pivot_n.columns if c != MY_INSTITUTION]
+peer_cols = [c for c in pivot_n.columns if c != my_inst_name]
 
 # ---------------------------------------------------------------------------
 # Scorecard row
 # ---------------------------------------------------------------------------
 
-unt_df   = df_raw[df_raw["institution"] == MY_INSTITUTION]
-peers_df = df_raw[df_raw["institution"] != MY_INSTITUTION]
+unt_df   = df_raw[df_raw["institution"] == my_inst_name]
+peers_df = df_raw[df_raw["institution"] != my_inst_name]
 
 unt_total_awards  = int(unt_df["awards"].sum())
 unt_total_funding = round(unt_df["funding_m"].sum(), 1)
 
-# Rank UNT vs all peers by total funding in scope
+# Rank my institution vs all peers by total funding in scope
 totals = (
     df_raw.groupby("institution")["funding_m"]
     .sum()
@@ -230,22 +276,22 @@ totals = (
     .reset_index()
 )
 rank_list = totals["institution"].tolist()
-unt_rank  = rank_list.index(MY_INSTITUTION) + 1 if MY_INSTITUTION in rank_list else None
+unt_rank  = rank_list.index(my_inst_name) + 1 if my_inst_name in rank_list else None
 n_ranked  = len(rank_list)
 
 # Programs where peers are ahead
 if peer_cols:
     peer_avg_funding = pivot_m[peer_cols].mean(axis=1)
-    dollar_gap       = peer_avg_funding - pivot_m[MY_INSTITUTION]
+    dollar_gap       = peer_avg_funding - pivot_m[my_inst_name]
     n_gaps           = int((dollar_gap > 0).sum())
 else:
     n_gaps = 0
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("UNT Awards",        f"{unt_total_awards:,}")
-c2.metric("UNT Funding",       f"${unt_total_funding:.1f}M")
-c3.metric("Rank Among Peers",  f"#{unt_rank} of {n_ranked}" if unt_rank else "—")
-c4.metric("Programs with Gaps", str(n_gaps))
+c1.metric(f"{my_col_label} Awards",  f"{unt_total_awards:,}")
+c2.metric(f"{my_col_label} Funding", f"${unt_total_funding:.1f}M")
+c3.metric("Rank Among Peers",        f"#{unt_rank} of {n_ranked}" if unt_rank else "—")
+c4.metric("Programs with Gaps",      str(n_gaps))
 
 st.divider()
 
@@ -256,13 +302,13 @@ st.divider()
 _headline = ""
 if peer_cols:
     peer_avg_awards  = pivot_n[peer_cols].mean(axis=1)
-    dollar_gap       = peer_avg_funding - pivot_m[MY_INSTITUTION]
+    dollar_gap       = peer_avg_funding - pivot_m[my_inst_name]
     gap_programs     = dollar_gap[dollar_gap > 0].sort_values(ascending=False)
 
     if not gap_programs.empty:
         top_prog       = gap_programs.index[0]
         top_prog_label = abbr_to_name.get(top_prog, top_prog)
-        unt_awards_top = int(pivot_n.loc[top_prog, MY_INSTITUTION])
+        unt_awards_top = int(pivot_n.loc[top_prog, my_inst_name])
         peer_avg_top   = round(float(peer_avg_awards.loc[top_prog]), 1)
         gap_m_top      = round(float(dollar_gap[top_prog]), 2)
 
@@ -273,10 +319,10 @@ if peer_cols:
 
         _headline = (
             f"**Biggest gap: {top_prog_label}** — "
-            f"In this program, UNT has **{unt_awards_top} awards**, "
+            f"In this program, {my_col_label} has **{unt_awards_top} awards**, "
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
-            f"If UNT matched the peer average, it would represent "
+            f"If {my_col_label} matched the peer average, it would represent "
             f"an additional **${gap_m_top:.1f}M** in funding."
         )
         st.markdown(_headline)
@@ -318,9 +364,9 @@ for prog in pivot_n.index:
     full_name = abbr_to_name.get(prog, prog)
     if len(full_name) > 45:
         full_name = full_name[:42] + "..."
-    unt_val  = int(pivot_n.loc[prog, MY_INSTITUTION])
+    unt_val  = int(pivot_n.loc[prog, my_inst_name])
     peer_avg = float(pivot_n.loc[prog, peer_cols].mean())
-    gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, MY_INSTITUTION]), 2)
+    gap_m    = round(float(pivot_m.loc[prog, peer_cols].mean()) - float(pivot_m.loc[prog, my_inst_name]), 2)
     field_awards, last_funded, cur, prev, two_ago = field_lookup.get(prog, (0, 0, 0, 0, 0))
 
     # Trend: compare prev year vs two years ago (prev is more complete than partial current year)
@@ -337,7 +383,7 @@ for prog in pivot_n.index:
     else:
         trend = "→"
 
-    row = {"Program": full_name, "UNT": unt_val}
+    row = {"Program": full_name, my_col_label: unt_val}
     for col in top_peer_cols:
         short      = PEER_SHORT.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
@@ -367,7 +413,7 @@ st.caption(
     f"FY{fy_end - 1} vs FY{fy_end - 2}. "
     f"**FY{fy_end}** = ✓ if any institution received an award in this program in the current fiscal year. "
     f"**Total Awards** = all awards made nationally in this program (not just peers) within the selected FY range. "
-    f"UNT column: 🔴 trailing badly · 🟠 within reach · 🟢 competitive or leading."
+    f"{my_col_label} column: 🔴 trailing badly · 🟠 within reach · 🟢 competitive or leading."
 )
 
 if display.empty:
@@ -391,8 +437,8 @@ def _color_trend(col):
 
 
 def _color_unt(col):
-    """Color UNT column by ratio to peer avg."""
-    if col.name != "UNT":
+    """Color my-institution column by ratio to peer avg."""
+    if col.name != my_col_label:
         return [""] * len(col)
     peer_avg = display["Peer Avg"]
     opp      = display["Opportunity ($M)"]
@@ -452,7 +498,7 @@ if agency in ("nsf", "nih"):
     st.subheader("PI Drill-Down")
     with st.expander("Select a program and institution to see PIs", expanded=True):
         # First pick institution, then show only programs where that institution has awards
-        _all_insts = [MY_INSTITUTION] + [c for c in pivot_n.columns if c != MY_INSTITUTION]
+        _all_insts = [my_inst_name] + [c for c in pivot_n.columns if c != my_inst_name]
         _pi_inst_labels = {i: PEER_SHORT.get(i, i) for i in _all_insts}
         _pi_inst_choice = st.selectbox(
             "Institution", _all_insts,
@@ -507,13 +553,13 @@ _pdf_sk_h:    int    = 700
 
 st.divider()
 st.subheader("Total Funding by Institution")
-st.caption("Total dollars awarded across all programs in the current scope. UNT shown in red.")
+st.caption(f"Total dollars awarded across all programs in the current scope. {my_col_label} shown in red.")
 
 bar_data = (
     totals.rename(columns={"institution": "Institution", "funding_m": "Funding ($M)"})
     .assign(
-        Label=lambda d: d["Institution"].map(lambda x: PEER_SHORT.get(x, x)),
-        IsUNT=lambda d: d["Institution"] == MY_INSTITUTION,
+        Label=lambda d: d["Institution"].map(lambda x: PEER_SHORT.get(x, my_col_label if x == my_inst_name else x)),
+        IsUNT=lambda d: d["Institution"] == my_inst_name,
     )
     .sort_values("Funding ($M)", ascending=True)
 )
@@ -564,7 +610,7 @@ st.divider()
 st.subheader("Program Activity Over Time")
 st.caption(
     "Field-wide award activity by program and fiscal year (all universities nationally). "
-    "Numbers in cells = UNT's award count. Blank = UNT had no awards that year."
+    f"Numbers in cells = {my_col_label}'s award count. Blank = {my_col_label} had no awards that year."
 )
 
 df_heatmap = get_heatmap_data(
@@ -716,7 +762,7 @@ else:
         fy_list = sorted(df_sk["fiscal_year"].unique().tolist())
         n_fy = len(fy_list)
 
-        inst_nodes = [MY_INSTITUTION] + peer_cols
+        inst_nodes = [my_inst_name] + peer_cols
         n_inst = len(inst_nodes)
 
         # Compute node totals for labels
@@ -731,7 +777,7 @@ else:
         _prog_names = [_clean_name(abbr_to_name.get(p, p))[:35] for p in programs_sk]
         _fy_names = [f"FY{fy}" for fy in fy_list]
         _inst_names = [
-            "UNT" if i == MY_INSTITUTION else PEER_SHORT.get(i, i)
+            my_col_label if i == my_inst_name else PEER_SHORT.get(i, i)
             for i in inst_nodes
         ]
 
@@ -749,7 +795,7 @@ else:
         prog_colors = ["rgba(142, 68, 173, 0.75)"] * n_prog
         fy_colors = ["rgba(39, 174, 96, 0.8)"] * n_fy
         inst_colors = [
-            "#e74c3c" if i == MY_INSTITUTION else "#2980b9"
+            "#e74c3c" if i == my_inst_name else "#2980b9"
             for i in inst_nodes
         ]
         node_colors = prog_colors + fy_colors + inst_colors
@@ -785,7 +831,7 @@ else:
                 targets.append(inst_idx[inst])
                 values.append(val)
                 link_colors.append(
-                    "rgba(231, 76, 60, 0.35)" if inst == MY_INSTITUTION
+                    "rgba(231, 76, 60, 0.35)" if inst == my_inst_name
                     else "rgba(41, 128, 185, 0.25)"
                 )
 
@@ -832,7 +878,7 @@ def _build_pdf(with_charts: bool = False) -> bytes:
     _pi_df = None
     if agency in ("nsf", "nih"):
         _pi_df = get_scoped_pis(
-            MY_INSTITUTION, agency, fy_start, fy_end,
+            my_inst_name, agency, fy_start, fy_end,
             dir_filter, subdiv_filter, institute_filter,
         )
         if _pi_df is not None and not _pi_df.empty:
