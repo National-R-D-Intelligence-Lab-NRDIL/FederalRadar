@@ -51,11 +51,13 @@ from queries import (
     NSF_DIV_NAMES,
     PEER_SHORT,
     get_agencies,
+    get_dynamic_peers,
     get_field_wide_stats,
     get_fy_bounds,
     get_heatmap_data,
     get_herd_institutions,
     get_herd_states,
+    get_institution_state,
     get_scoped_pis,
     get_my_ueis,
     get_nih_institutes,
@@ -154,7 +156,19 @@ with st.sidebar:
 
     st.divider()
 
-    peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+    # Determine if this is UNT (hardcoded peers) or dynamic institution
+    _is_unt_sidebar = selected_uei in get_my_ueis()
+    _inst_state = get_institution_state(selected_uei) or "??"
+
+    if _is_unt_sidebar:
+        peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+    else:
+        _state_label = _inst_state
+        peer_set = st.radio(
+            "Peer Set",
+            [_state_label, "National", "Both"],
+            index=0,
+        )
 
     st.divider()
 
@@ -175,9 +189,22 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 _all_my_ueis = tuple(get_my_ueis())
-my_ueis      = _all_my_ueis if selected_uei in _all_my_ueis else (selected_uei,)
-peer_items = get_peer_institutions(peer_set)
-peer_ueis  = tuple(uei for _, uei in peer_items)
+_is_unt = selected_uei in _all_my_ueis
+my_ueis = _all_my_ueis if _is_unt else (selected_uei,)
+
+if _is_unt:
+    peer_items = get_peer_institutions(peer_set)
+else:
+    # Dynamic KNN peers from HERD data
+    _dyn_set = peer_set if peer_set in ("National", "Both") else get_institution_state(selected_uei)
+    peer_items = get_dynamic_peers(selected_uei, _dyn_set, k=10)
+peer_ueis = tuple(uei for _, uei in peer_items)
+
+# Build short-label lookup: for UNT use hardcoded PEER_SHORT, for dynamic use _short_label
+_peer_short = dict(PEER_SHORT)  # start with hardcoded
+for _plabel, _puei in peer_items:
+    if _plabel not in _peer_short:
+        _peer_short[_plabel] = _short_label(_plabel)
 
 df_raw = get_raw_comparison(
     my_ueis, peer_ueis, agency, fy_start, fy_end,
@@ -314,7 +341,7 @@ if peer_cols:
 
         # Find the single peer with most awards in top program
         top_peer_awards = pivot_n.loc[top_prog, peer_cols].sort_values(ascending=False)
-        top_peer_name   = PEER_SHORT.get(top_peer_awards.index[0], top_peer_awards.index[0])
+        top_peer_name   = _peer_short.get(top_peer_awards.index[0], top_peer_awards.index[0])
         top_peer_count  = int(top_peer_awards.iloc[0])
 
         _headline = (
@@ -385,7 +412,7 @@ for prog in pivot_n.index:
 
     row = {"Program": full_name, my_col_label: unt_val}
     for col in top_peer_cols:
-        short      = PEER_SHORT.get(col, col[:8])
+        short      = _peer_short.get(col, col[:8])
         row[short] = int(pivot_n.loc[prog, col])
     row["Peer Avg"]         = round(peer_avg, 1)
     row["Opportunity ($M)"] = gap_m
@@ -407,8 +434,8 @@ n_competitive = int((display["Opportunity ($M)"] <= 0).sum())
 st.subheader("Program Breakdown")
 st.caption(
     f"All programs sorted by opportunity size. "
-    f"**Opportunity ($M)** = how much more UNT would receive if it matched the peer average "
-    f"(negative = UNT is already at or above peer average). "
+    f"**Opportunity ($M)** = how much more {my_col_label} would receive if it matched the peer average "
+    f"(negative = {my_col_label} is already at or above peer average). "
     f"**Trend** = field-wide award count direction (↑ growing · → flat · ↓ declining) comparing "
     f"FY{fy_end - 1} vs FY{fy_end - 2}. "
     f"**FY{fy_end}** = ✓ if any institution received an award in this program in the current fiscal year. "
@@ -499,7 +526,7 @@ if agency in ("nsf", "nih"):
     with st.expander("Select a program and institution to see PIs", expanded=True):
         # First pick institution, then show only programs where that institution has awards
         _all_insts = [my_inst_name] + [c for c in pivot_n.columns if c != my_inst_name]
-        _pi_inst_labels = {i: PEER_SHORT.get(i, i) for i in _all_insts}
+        _pi_inst_labels = {i: _peer_short.get(i, i) for i in _all_insts}
         _pi_inst_choice = st.selectbox(
             "Institution", _all_insts,
             format_func=lambda x: _pi_inst_labels.get(x, x),
@@ -558,7 +585,7 @@ st.caption(f"Total dollars awarded across all programs in the current scope. {my
 bar_data = (
     totals.rename(columns={"institution": "Institution", "funding_m": "Funding ($M)"})
     .assign(
-        Label=lambda d: d["Institution"].map(lambda x: PEER_SHORT.get(x, my_col_label if x == my_inst_name else x)),
+        Label=lambda d: d["Institution"].map(lambda x: _peer_short.get(x, my_col_label if x == my_inst_name else x)),
         IsUNT=lambda d: d["Institution"] == my_inst_name,
     )
     .sort_values("Funding ($M)", ascending=True)
@@ -677,14 +704,14 @@ else:
             "<b>%{y}</b><br>"
             "FY%{x}<br>"
             "Field: $%{customdata[0]:.1f}M<br>"
-            "UNT: $%{customdata[1]:.1f}M (awards: %{text})<extra></extra>"
+            f"{my_col_label}: $%{{customdata[1]:.1f}}M (awards: %{{text}})<extra></extra>"
         )
     else:
         hover_tpl = (
             "<b>%{y}</b><br>"
             "FY%{x}<br>"
             "Field Awards: %{customdata[0]:,.0f}<br>"
-            "UNT Awards: %{text}<extra></extra>"
+            f"{my_col_label} Awards: %{{text}}<extra></extra>"
         )
 
     fig_hm = go.Figure(go.Heatmap(
@@ -717,9 +744,9 @@ else:
 st.divider()
 st.subheader("Funding Flow: Programs → Fiscal Year → Institutions")
 st.caption(
-    "How awards flow from programs through fiscal years to UNT and peers. "
+    f"How awards flow from programs through fiscal years to {my_col_label} and peers. "
     "Band width is proportional to the selected metric. "
-    "UNT in red · peers in blue · fiscal years in green."
+    f"{my_col_label} in red · peers in blue · fiscal years in green."
 )
 
 if df_raw.empty or not peer_cols:
@@ -777,7 +804,7 @@ else:
         _prog_names = [_clean_name(abbr_to_name.get(p, p))[:35] for p in programs_sk]
         _fy_names = [f"FY{fy}" for fy in fy_list]
         _inst_names = [
-            my_col_label if i == my_inst_name else PEER_SHORT.get(i, i)
+            my_col_label if i == my_inst_name else _peer_short.get(i, i)
             for i in inst_nodes
         ]
 
@@ -852,7 +879,7 @@ else:
         fig_sk.update_layout(
             margin=dict(t=10, b=10, l=10, r=10),
             height=max(500, 28 * n_prog + 200),
-            font=dict(size=12),
+            font=dict(size=12, family="Arial, Helvetica, sans-serif"),
         )
         st.plotly_chart(fig_sk, use_container_width=True)
         _pdf_fig_sk = fig_sk

@@ -1,6 +1,6 @@
 APScheduler>=3.10
-streamlit>=1.35
+streamlit==1.57.0
 pandas>=2.0
-plotly>=5.20
+plotly==6.7.0
 fpdf2>=2.8
 kaleido>=0.2

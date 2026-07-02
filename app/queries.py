@@ -4,13 +4,14 @@ All database queries for the Federal Radar Streamlit app.
 All results are cached for 1 hour to keep the UI fast.
 """
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-DB_PATH = Path(__file__).parent.parent / "data" / "federal_awards.db"
+DB_PATH = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent / "data" / "federal_awards.db")))
 
 MY_INSTITUTION = "University of North Texas"
 
@@ -364,7 +365,7 @@ def get_cfda_programs(agency: str) -> list[tuple[str, str]]:
     with _conn() as conn:
         rows = conn.execute(
             f"""SELECT DISTINCT opportunity_number,
-                      COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)
+                      COALESCE(cfda_title, opportunity_number)
                FROM awards
                WHERE source = ? AND opportunity_number IS NOT NULL
                  AND {ed_clause}
@@ -784,7 +785,7 @@ def get_my_ueis() -> list[str]:
 
 @st.cache_data(ttl=3600)
 def get_peer_institutions(peer_set: str) -> list[tuple[str, str]]:
-    """Returns (peer_label, inst_uei) for the selected peer set."""
+    """Returns (peer_label, inst_uei) for UNT's hardcoded peer set."""
     if peer_set == "Texas":
         cond = "is_peer_texas = 1"
     elif peer_set == "National":
@@ -797,6 +798,165 @@ def get_peer_institutions(peer_set: str) -> list[tuple[str, str]]:
             f" WHERE {cond} ORDER BY peer_label"
         ).fetchall()
     return rows
+
+
+@st.cache_data(ttl=3600)
+def get_dynamic_peers(
+    selected_uei: str,
+    peer_set: str,
+    k: int = 10,
+) -> list[tuple[str, str]]:
+    """KNN peers from HERD data: top-k nearest by research expenditure.
+
+    peer_set values:
+        "<state>" (e.g. "TX") — same state, same Carnegie, nearest by funding
+        "National"            — same Carnegie, any state, nearest by funding
+        "Both"                — union of state + national (up to 2k)
+
+    Returns list of (display_name, awards_uei).
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT state, carnegie, awards_total_m FROM herd_institutions WHERE awards_uei = ?",
+            (selected_uei,),
+        ).fetchone()
+        if not row:
+            return []
+        my_state, my_carnegie, my_funding = row
+        my_funding = my_funding or 0.0
+
+        def _fetch_nearest(state_filter: str | None) -> list[tuple[str, str]]:
+            if state_filter:
+                sql = """
+                    SELECT ipeds_name, awards_uei, awards_total_m
+                    FROM herd_institutions
+                    WHERE awards_uei IS NOT NULL
+                      AND awards_uei != ?
+                      AND state = ?
+                      AND carnegie = ?
+                    ORDER BY ABS(awards_total_m - ?) ASC
+                    LIMIT ?
+                """
+                params = (selected_uei, state_filter, my_carnegie, my_funding, k)
+            else:
+                sql = """
+                    SELECT ipeds_name, awards_uei, awards_total_m
+                    FROM herd_institutions
+                    WHERE awards_uei IS NOT NULL
+                      AND awards_uei != ?
+                      AND carnegie = ?
+                    ORDER BY ABS(awards_total_m - ?) ASC
+                    LIMIT ?
+                """
+                params = (selected_uei, my_carnegie, my_funding, k)
+            return [
+                (r[0], r[1]) for r in conn.execute(sql, params).fetchall()
+            ]
+
+        if peer_set == "National":
+            return _fetch_nearest(None)
+        elif peer_set == "Both":
+            state_peers = _fetch_nearest(my_state)
+            national_peers = _fetch_nearest(None)
+            # Merge, deduplicate, preserve order
+            seen = set()
+            merged = []
+            for item in state_peers + national_peers:
+                if item[1] not in seen:
+                    seen.add(item[1])
+                    merged.append(item)
+            return merged
+        else:
+            # peer_set is a state abbreviation
+            return _fetch_nearest(my_state)
+
+
+@st.cache_data(ttl=3600)
+def get_institution_state(awards_uei: str) -> str | None:
+    """Return the two-letter state code for an institution."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT state FROM herd_institutions WHERE awards_uei = ?",
+            (awards_uei,),
+        ).fetchone()
+    return row[0] if row else None
+
+
+@st.cache_data(ttl=3600)
+def get_historical_avg_by_agency(
+    inst_ueis: tuple[str, ...],
+    fy_start: int,
+    fy_end: int,
+) -> pd.DataFrame:
+    """3-year trailing average of research-only awards by agency.
+
+    Returns DataFrame: source | avg_awards | avg_funding_m | total_funding_m
+    ED non-research CFDAs are excluded automatically.
+    """
+    if not inst_ueis:
+        return pd.DataFrame()
+
+    uei_ph = ",".join("?" * len(inst_ueis))
+    ed_ph = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+    n_years = fy_end - fy_start + 1
+
+    sql = f"""
+        SELECT source,
+               COUNT(*)                      AS total_awards,
+               ROUND(SUM(awd_amount)/1e6, 2) AS total_funding_m
+        FROM awards
+        WHERE inst_uei IN ({uei_ph})
+          AND fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+          AND NOT (source = 'ed' AND opportunity_number IN ({ed_ph}))
+        GROUP BY source
+        ORDER BY total_funding_m DESC
+    """
+    params = list(inst_ueis) + [fy_start, fy_end] + list(ED_NON_RESEARCH_CFDAS)
+
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+
+    if df.empty:
+        return df
+
+    df["avg_awards"] = (df["total_awards"] / n_years).round(1)
+    df["avg_funding_m"] = (df["total_funding_m"] / n_years).round(2)
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_historical_funding_by_fy(
+    inst_ueis: tuple[str, ...],
+    fy_start: int,
+    fy_end: int,
+) -> pd.DataFrame:
+    """Annual research-only funding totals for an institution.
+
+    Returns DataFrame: fiscal_year | awards | funding_m
+    """
+    if not inst_ueis:
+        return pd.DataFrame()
+
+    uei_ph = ",".join("?" * len(inst_ueis))
+    ed_ph = ",".join("?" * len(ED_NON_RESEARCH_CFDAS))
+
+    sql = f"""
+        SELECT fiscal_year,
+               COUNT(*)                      AS awards,
+               ROUND(SUM(awd_amount)/1e6, 2) AS funding_m
+        FROM awards
+        WHERE inst_uei IN ({uei_ph})
+          AND fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+          AND NOT (source = 'ed' AND opportunity_number IN ({ed_ph}))
+        GROUP BY fiscal_year
+        ORDER BY fiscal_year
+    """
+    params = list(inst_ueis) + [fy_start, fy_end] + list(ED_NON_RESEARCH_CFDAS)
+
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
 
 
 @st.cache_data(ttl=3600)
@@ -830,16 +990,16 @@ def get_field_wide_stats(
             name_expr = "pgm_ele_name"
         elif dir_filter:
             prog_col = "div_abbr"
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+            name_expr = "COALESCE(div_full_name, div_abbr)"
         else:
             prog_col = "dir_abbr"
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+            name_expr = "COALESCE(dir_full_name, dir_abbr)"
     elif agency == "nih":
         prog_col = "activity_code" if institute_filter else "nih_institute"
         name_expr = prog_col
     else:
         prog_col  = "opportunity_number"
-        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
 
     clauses = [
         "source = ?",
@@ -906,16 +1066,16 @@ def get_heatmap_data(
             name_expr = "pgm_ele_name"
         elif dir_filter:
             prog_col  = "div_abbr"
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+            name_expr = "COALESCE(div_full_name, div_abbr)"
         else:
             prog_col  = "dir_abbr"
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+            name_expr = "COALESCE(dir_full_name, dir_abbr)"
     elif agency == "nih":
         prog_col  = "activity_code" if institute_filter else "nih_institute"
         name_expr = prog_col
     else:
         prog_col  = "opportunity_number"
-        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
 
     clauses = [
         "source = ?",
@@ -1000,7 +1160,7 @@ def get_raw_comparison(
         name_expr = prog_col
     else:
         prog_col  = "opportunity_number"
-        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
 
     placeholders = ",".join("?" * len(all_ueis))
     clauses = [
@@ -1022,9 +1182,9 @@ def get_raw_comparison(
             params.append(subdiv_filter)
         # Include full name column where available
         if prog_col == "dir_abbr":
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+            name_expr = "COALESCE(dir_full_name, dir_abbr)"
         elif prog_col == "div_abbr":
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+            name_expr = "COALESCE(div_full_name, div_abbr)"
         else:
             name_expr = prog_col
     elif agency == "nih" and institute_filter:
@@ -1087,7 +1247,7 @@ def get_raw_comparison_by_fy(
         name_expr = prog_col
     else:
         prog_col = "opportunity_number"
-        name_expr = "COALESCE(json_extract(raw_json,'$.cfda_title'), opportunity_number)"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
 
     placeholders = ",".join("?" * len(all_ueis))
     clauses = [
@@ -1108,9 +1268,9 @@ def get_raw_comparison_by_fy(
             clauses.append("div_abbr = ?")
             params.append(subdiv_filter)
         if prog_col == "dir_abbr":
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_dir_long_name'), dir_abbr)"
+            name_expr = "COALESCE(dir_full_name, dir_abbr)"
         elif prog_col == "div_abbr":
-            name_expr = "COALESCE(json_extract(raw_json,'$.org_div_long_name'), div_abbr)"
+            name_expr = "COALESCE(div_full_name, div_abbr)"
         else:
             name_expr = prog_col
     elif agency == "nih" and institute_filter:

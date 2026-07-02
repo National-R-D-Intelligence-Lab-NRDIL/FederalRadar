@@ -41,7 +41,11 @@ CREATE TABLE IF NOT EXISTS awards (
     direct_cost_amt         REAL,
     -- Institution identity (populated via UEI enrichment pipeline)
     inst_uei                TEXT,   -- SAM.gov Unique Entity Identifier
-    inst_canonical_name     TEXT    -- Normalized display name tied to UEI
+    inst_canonical_name     TEXT,   -- Normalized display name tied to UEI
+    -- Derived from raw_json at load time (avoids needing raw_json for display)
+    dir_full_name           TEXT,   -- NSF directorate full name
+    div_full_name           TEXT,   -- NSF division full name
+    cfda_title               TEXT    -- USASpending/ED CFDA program title
 );
 """
 

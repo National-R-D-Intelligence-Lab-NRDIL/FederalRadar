@@ -10,7 +10,7 @@ from pathlib import Path
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 sys.path.insert(0, str(Path(__file__).parent))
-from src.db import init_db, upsert_nsf_awards_batch
+from src.db import init_db, upsert_nsf_awards_batch, log_refresh_start, log_refresh_end
 from scripts.nsf_api_fetcher import fetch_all, map_record
 from scripts.nih_api_fetcher import fetch_all_by_date_range, map_record as nih_map_record
 
@@ -25,15 +25,23 @@ def run_nsf_refresh():
 
     print(f"[scheduler] Fetching NSF awards {date_start} → {date_end}", flush=True)
     init_db()
+    log_id = log_refresh_start("nsf", details=f"{date_start} to {date_end}")
 
-    raw_records = fetch_all(date_start, date_end)
-    if not raw_records:
-        print("[scheduler] NSF: No records returned.", flush=True)
-        return
+    try:
+        raw_records = fetch_all(date_start, date_end)
+        if not raw_records:
+            print("[scheduler] NSF: No records returned.", flush=True)
+            log_refresh_end(log_id, "success", records_fetched=0, records_upserted=0)
+            return
 
-    mapped = [map_record(r) for r in raw_records if r.get("id")]
-    upsert_nsf_awards_batch(mapped)
-    print(f"[scheduler] NSF done. Upserted {len(mapped)} records.", flush=True)
+        mapped = [map_record(r) for r in raw_records if r.get("id")]
+        upsert_nsf_awards_batch(mapped)
+        print(f"[scheduler] NSF done. Upserted {len(mapped)} records.", flush=True)
+        log_refresh_end(log_id, "success", records_fetched=len(raw_records), records_upserted=len(mapped))
+    except Exception as e:
+        print(f"[scheduler] NSF refresh failed: {e}", flush=True)
+        log_refresh_end(log_id, "error", error_message=str(e))
+        raise
 
 
 def run_nih_refresh():
@@ -43,15 +51,23 @@ def run_nih_refresh():
 
     print(f"[scheduler] Fetching NIH awards {date_from} → {date_to}", flush=True)
     init_db()
+    log_id = log_refresh_start("nih", details=f"{date_from} to {date_to}")
 
-    raw_records = fetch_all_by_date_range(date_from, date_to)
-    if not raw_records:
-        print("[scheduler] NIH: No records returned.", flush=True)
-        return
+    try:
+        raw_records = fetch_all_by_date_range(date_from, date_to)
+        if not raw_records:
+            print("[scheduler] NIH: No records returned.", flush=True)
+            log_refresh_end(log_id, "success", records_fetched=0, records_upserted=0)
+            return
 
-    mapped = [nih_map_record(r) for r in raw_records if r.get("project_num")]
-    upsert_nsf_awards_batch(mapped)
-    print(f"[scheduler] NIH done. Upserted {len(mapped)} records.", flush=True)
+        mapped = [nih_map_record(r) for r in raw_records if r.get("project_num")]
+        upsert_nsf_awards_batch(mapped)
+        print(f"[scheduler] NIH done. Upserted {len(mapped)} records.", flush=True)
+        log_refresh_end(log_id, "success", records_fetched=len(raw_records), records_upserted=len(mapped))
+    except Exception as e:
+        print(f"[scheduler] NIH refresh failed: {e}", flush=True)
+        log_refresh_end(log_id, "error", error_message=str(e))
+        raise
 
 
 if __name__ == "__main__":
