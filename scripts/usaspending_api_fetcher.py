@@ -12,6 +12,12 @@ Bulk Download API replaces bi-weekly pagination:
   - GET  /api/v2/bulk_download/status/?file_name=xxx.zip → poll until finished
   - Download ZIP → extract CSV(s) → filter university rows → write JSONL
 
+Incremental refresh (used by scheduler.py for daily automated updates):
+  - fetch_incremental() / map_record_from_search() use the synchronous
+    /api/v2/search/spending_by_award/ endpoint with a small rolling date
+    window — no job submission, polling, or ZIP download. One paginated
+    call covers all tracked agencies at once (agency filter is OR'd).
+
 Live API gotchas:
   - recipient_type_names filter is broken (returns 0 results) → use keyword filter instead
   - Fiscal Year field is always null → derive from Start Date using Oct 1 boundary
@@ -84,6 +90,119 @@ def derive_fiscal_year(start_date: str) -> int | None:
         return d.year + 1 if d.month >= 10 else d.year
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Incremental refresh via Advanced Search API (for daily scheduler use)
+# Lightweight alternative to the bulk_download flow below — synchronous,
+# paginated, small date window. No ZIP/job/poll involved.
+# NOTE: recipient_type_names filter is broken on this endpoint (returns 0
+# results — same gotcha as bulk download), so university filtering is done
+# client-side via is_university(), same as the bulk CSV path.
+# ---------------------------------------------------------------------------
+
+SEARCH_URL = "https://api.usaspending.gov/api/v2/search/spending_by_award/"
+
+SEARCH_FIELDS = [
+    "Award ID", "Recipient Name", "Award Amount",
+    "Start Date", "End Date", "Awarding Agency", "Awarding Sub Agency",
+    "CFDA Number", "Description", "Place of Performance State Code",
+    "Last Modified Date", "generated_internal_id",
+]
+
+AGENCY_NAME_TO_KEY = {v: k for k, v in AGENCIES.items()}
+
+
+def fetch_incremental(date_from: str, date_to: str) -> list[dict]:
+    """Fetch all grant awards across all tracked agencies in a date window.
+
+    Single paginated query with an OR'd agency filter (all 11 agencies in
+    one call) — no per-agency loop needed.
+    """
+    results: list[dict] = []
+    page = 1
+    while True:
+        payload = {
+            "filters": {
+                "agencies": [
+                    {"type": "awarding", "tier": "toptier", "name": name}
+                    for name in AGENCIES.values()
+                ],
+                "time_period": [
+                    {"start_date": date_from, "end_date": date_to, "date_type": "action_date"}
+                ],
+                "award_type_codes": GRANT_AWARD_TYPES,
+            },
+            "fields": SEARCH_FIELDS,
+            "page": page,
+            "limit": 100,
+            "sort": "Award Amount",
+            "order": "desc",
+        }
+        req = urllib.request.Request(
+            SEARCH_URL,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+
+        results.extend(data.get("results", []))
+        if not data.get("page_metadata", {}).get("hasNext"):
+            break
+        page += 1
+        if page > 50:  # safety cap — a small rolling window should never need this many pages
+            break
+
+    return results
+
+
+def map_record_from_search(row: dict) -> dict | None:
+    """Map one Advanced Search API result to the awards DB schema.
+
+    Returns None for non-university recipients, agencies outside AGENCIES,
+    or excluded sub-agencies (e.g. NIH within HHS).
+    """
+    recipient = row.get("Recipient Name") or ""
+    if not is_university(recipient):
+        return None
+
+    agency_key = AGENCY_NAME_TO_KEY.get(row.get("Awarding Agency"))
+    if not agency_key:
+        return None
+
+    excluded_subs = EXCLUDE_SUBAGENCIES.get(agency_key, set())
+    if excluded_subs:
+        sub = (row.get("Awarding Sub Agency") or "").lower()
+        if any(ex in sub for ex in excluded_subs):
+            return None
+
+    start_date = normalize_date(row.get("Start Date"))
+
+    return {
+        "awd_id":                 row.get("generated_internal_id"),
+        "awd_titl_txt":           row.get("Description"),
+        "inst_name":              recipient,
+        "inst_state_code":        normalize_state(row.get("Place of Performance State Code")),
+        "awd_amount":             normalize_amount(row.get("Award Amount")),
+        "obligation_date":        normalize_date(row.get("Last Modified Date")),
+        "project_start_date":     start_date,
+        "project_end_date":       normalize_date(row.get("End Date")),
+        "fiscal_year":            derive_fiscal_year(start_date),
+        "source":                 agency_key,
+        "agcy_id":                agency_key.upper(),
+        "opportunity_number":     row.get("CFDA Number"),
+        "raw_json":               json.dumps(row),
+        "awd_abstract_narration": None,
+        "pi_name":                None,
+        "dir_abbr":               None,
+        "div_abbr":               None,
+        "pgm_ele_name":           None,
+        "activity_code":          None,
+        "nih_institute":          None,
+        "direct_cost_amt":        None,
+    }
 
 
 def request_bulk_download(agency_key: str, fy: int) -> str:
@@ -229,10 +348,13 @@ def normalize_state(value: str | None) -> str | None:
     return _STATE_NAME_TO_CODE.get(v)
 
 
-def normalize_amount(value: str | None) -> float | None:
-    """Parse dollar amount string to float, handling commas and empty strings."""
-    if not value:
+def normalize_amount(value) -> float | None:
+    """Parse a dollar amount to float. Handles CSV strings (with commas) and
+    the search API's native floats/ints."""
+    if value is None or value == "":
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
     try:
         return float(value.replace(",", ""))
     except (TypeError, ValueError):

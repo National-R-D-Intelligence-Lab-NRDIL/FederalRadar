@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import plotly.io as pio
+# import plotly.io as pio  # only used by _to_png (PDF export, disabled)
 import streamlit as st
 
-from pdf_export import generate_gap_report
+# PDF export disabled for now (not needed for July strategy meeting)
+# from pdf_export import generate_gap_report
 
 
 def _short_label(name: str) -> str:
@@ -30,20 +31,21 @@ def _short_label(name: str) -> str:
     return s[:20] + ("…" if len(s) > 20 else "")
 
 
-def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
-    """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure.
-    Clones the figure and widens margins so labels are not clipped in the
-    fixed-width kaleido render (automargin doesn't work reliably there)."""
-    import copy
-    try:
-        fig_copy = copy.deepcopy(fig)
-        cur_margin = fig_copy.layout.margin or {}
-        cur_l = getattr(cur_margin, "l", None) or 10
-        cur_b = getattr(cur_margin, "b", None) or 10
-        fig_copy.update_layout(margin=dict(l=max(cur_l, 180), b=max(cur_b, 60)))
-        return pio.to_image(fig_copy, format="png", width=width, height=height, scale=1)
-    except Exception:
-        return None
+# _to_png: only used by the PDF export block below (currently disabled).
+# def _to_png(fig, width: int = 1000, height: int = 700) -> bytes | None:
+#     """Export a Plotly figure to PNG bytes via kaleido. Returns None on failure.
+#     Clones the figure and widens margins so labels are not clipped in the
+#     fixed-width kaleido render (automargin doesn't work reliably there)."""
+#     import copy
+#     try:
+#         fig_copy = copy.deepcopy(fig)
+#         cur_margin = fig_copy.layout.margin or {}
+#         cur_l = getattr(cur_margin, "l", None) or 10
+#         cur_b = getattr(cur_margin, "b", None) or 10
+#         fig_copy.update_layout(margin=dict(l=max(cur_l, 180), b=max(cur_b, 60)))
+#         return pio.to_image(fig_copy, format="png", width=width, height=height, scale=1)
+#     except Exception:
+#         return None
 from queries import (
     ED_EXCLUSION_NOTE,
     ED_NON_RESEARCH_CFDAS,
@@ -887,102 +889,104 @@ else:
 
 # ---------------------------------------------------------------------------
 # PDF export — lazy generation (only renders charts on click)
+# Disabled for now (not needed for July strategy meeting). To re-enable,
+# uncomment this block.
 # ---------------------------------------------------------------------------
 
-st.divider()
-
-_pdf_fname = (
-    f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}"
-    f"_{fy_start}-{fy_end}.pdf"
-)
-
-_include_charts = st.checkbox("Include charts in PDF", value=False,
-                               help="Adds bar chart, heatmap, and Sankey. Takes ~10 sec extra.")
-
-
-def _build_pdf(with_charts: bool = False) -> bytes:
-    """Build the PDF report. Called only on button click."""
-    _pi_df = None
-    if agency in ("nsf", "nih"):
-        _pi_df = get_scoped_pis(
-            my_inst_name, agency, fy_start, fy_end,
-            dir_filter, subdiv_filter, institute_filter,
-        )
-        if _pi_df is not None and not _pi_df.empty:
-            _pi_df = _pi_df.copy()
-
-            def _pi_scope(row, _agency):
-                parts = [_agency.upper()]
-                for col in ["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"]:
-                    if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
-                        parts.append(str(row[col]).strip())
-                return " / ".join(parts)
-
-            _pi_df.insert(1, "Scope", _pi_df.apply(lambda r: _pi_scope(r, agency), axis=1))
-            _pi_df.drop(
-                columns=["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"],
-                errors="ignore", inplace=True,
-            )
-
-    _charts: list[tuple[str, bytes]] | None = None
-    if with_charts:
-        _charts = []
-        if _pdf_fig_bar is not None:
-            _png = _to_png(_pdf_fig_bar, height=min(900, max(400, 28 * len(bar_data))))
-            if _png:
-                _charts.append(("Total Funding by Institution", _png))
-        if _pdf_fig_hm is not None:
-            _png = _to_png(_pdf_fig_hm, height=min(900, _pdf_hm_h))
-            if _png:
-                _charts.append(("Program Activity Heatmap", _png))
-        if _pdf_fig_sk is not None:
-            _png = _to_png(_pdf_fig_sk, height=min(900, _pdf_sk_h))
-            if _png:
-                _charts.append(("Funding Flow: Programs to Institutions", _png))
-
-    _df_fy = get_raw_comparison_by_fy(
-        my_ueis, peer_ueis, agency, fy_start, fy_end,
-        dir_filter, subdiv_filter, institute_filter,
-        cfda_filter, ed_exclude_cfdas,
-    )
-    fy_peer = (
-        _df_fy.groupby(["institution", "fiscal_year"])["funding_m"]
-        .sum()
-        .unstack(fill_value=0)
-        .reset_index()
-    ) if not _df_fy.empty else None
-
-    return generate_gap_report(
-        scope_label     = scope_label,
-        fy_start        = fy_start,
-        fy_end          = fy_end,
-        peer_set        = peer_set,
-        unt_awards      = unt_total_awards,
-        unt_funding     = unt_total_funding,
-        unt_rank        = unt_rank,
-        n_ranked        = n_ranked,
-        n_gaps          = n_gaps,
-        headline        = _headline,
-        gap_df          = display,
-        peer_funding    = totals,
-        fy_peer_funding = fy_peer,
-        pi_df           = _pi_df,
-        charts          = _charts or None,
-    )
-
-
-if st.button("Export PDF Report", type="primary"):
-    _label = "Rendering charts and building PDF..." if _include_charts else "Building PDF..."
-    with st.spinner(_label):
-        st.session_state["_pdf_bytes"] = _build_pdf(with_charts=_include_charts)
-
-if st.session_state.get("_pdf_bytes"):
-    st.download_button(
-        "Download PDF",
-        st.session_state["_pdf_bytes"],
-        file_name=_pdf_fname,
-        mime="application/pdf",
-    )
+# st.divider()
+#
+# _pdf_fname = (
+#     f"federal_radar_{scope_label.replace(' / ', '_').replace(' ', '_')}"
+#     f"_{fy_start}-{fy_end}.pdf"
+# )
+#
+# _include_charts = st.checkbox("Include charts in PDF", value=False,
+#                                help="Adds bar chart, heatmap, and Sankey. Takes ~10 sec extra.")
+#
+#
+# def _build_pdf(with_charts: bool = False) -> bytes:
+#     """Build the PDF report. Called only on button click."""
+#     _pi_df = None
+#     if agency in ("nsf", "nih"):
+#         _pi_df = get_scoped_pis(
+#             my_inst_name, agency, fy_start, fy_end,
+#             dir_filter, subdiv_filter, institute_filter,
+#         )
+#         if _pi_df is not None and not _pi_df.empty:
+#             _pi_df = _pi_df.copy()
+#
+#             def _pi_scope(row, _agency):
+#                 parts = [_agency.upper()]
+#                 for col in ["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"]:
+#                     if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
+#                         parts.append(str(row[col]).strip())
+#                 return " / ".join(parts)
+#
+#             _pi_df.insert(1, "Scope", _pi_df.apply(lambda r: _pi_scope(r, agency), axis=1))
+#             _pi_df.drop(
+#                 columns=["nih_institute", "dir_abbr", "div_abbr", "pgm_ele_name", "activity_code"],
+#                 errors="ignore", inplace=True,
+#             )
+#
+#     _charts: list[tuple[str, bytes]] | None = None
+#     if with_charts:
+#         _charts = []
+#         if _pdf_fig_bar is not None:
+#             _png = _to_png(_pdf_fig_bar, height=min(900, max(400, 28 * len(bar_data))))
+#             if _png:
+#                 _charts.append(("Total Funding by Institution", _png))
+#         if _pdf_fig_hm is not None:
+#             _png = _to_png(_pdf_fig_hm, height=min(900, _pdf_hm_h))
+#             if _png:
+#                 _charts.append(("Program Activity Heatmap", _png))
+#         if _pdf_fig_sk is not None:
+#             _png = _to_png(_pdf_fig_sk, height=min(900, _pdf_sk_h))
+#             if _png:
+#                 _charts.append(("Funding Flow: Programs to Institutions", _png))
+#
+#     _df_fy = get_raw_comparison_by_fy(
+#         my_ueis, peer_ueis, agency, fy_start, fy_end,
+#         dir_filter, subdiv_filter, institute_filter,
+#         cfda_filter, ed_exclude_cfdas,
+#     )
+#     fy_peer = (
+#         _df_fy.groupby(["institution", "fiscal_year"])["funding_m"]
+#         .sum()
+#         .unstack(fill_value=0)
+#         .reset_index()
+#     ) if not _df_fy.empty else None
+#
+#     return generate_gap_report(
+#         scope_label     = scope_label,
+#         fy_start        = fy_start,
+#         fy_end          = fy_end,
+#         peer_set        = peer_set,
+#         unt_awards      = unt_total_awards,
+#         unt_funding     = unt_total_funding,
+#         unt_rank        = unt_rank,
+#         n_ranked        = n_ranked,
+#         n_gaps          = n_gaps,
+#         headline        = _headline,
+#         gap_df          = display,
+#         peer_funding    = totals,
+#         fy_peer_funding = fy_peer,
+#         pi_df           = _pi_df,
+#         charts          = _charts or None,
+#     )
+#
+#
+# if st.button("Export PDF Report", type="primary"):
+#     _label = "Rendering charts and building PDF..." if _include_charts else "Building PDF..."
+#     with st.spinner(_label):
+#         st.session_state["_pdf_bytes"] = _build_pdf(with_charts=_include_charts)
+#
+# if st.session_state.get("_pdf_bytes"):
+#     st.download_button(
+#         "Download PDF",
+#         st.session_state["_pdf_bytes"],
+#         file_name=_pdf_fname,
+#         mime="application/pdf",
+#     )
 
 # ---------------------------------------------------------------------------
 # Validation footer
