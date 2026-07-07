@@ -18,14 +18,15 @@ Match priority:
 """
 
 import csv
+import os
 import re
 import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
-DB = Path("data/federal_awards.db")
-IPEDS = Path("data/ipeds/HD2023.csv")
-OUT = Path("data/herd_ipeds_crosswalk.csv")
+DB = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent / "data" / "federal_awards.db")))
+IPEDS = Path(__file__).parent.parent / "data" / "ipeds" / "HD2023.csv"
+OUT = Path(__file__).parent.parent / "data" / "herd_ipeds_crosswalk.csv"
 
 # Carnegie C18BASIC codes to include (doctoral + masters = HERD-eligible).
 # 25 = Special Focus Four-Year: Medical Schools & Health Science Centers.

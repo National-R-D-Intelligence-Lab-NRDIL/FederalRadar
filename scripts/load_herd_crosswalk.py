@@ -9,12 +9,13 @@ Usage:
 """
 
 import csv
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-DB = Path("data/federal_awards.db")
-CROSSWALK = Path("data/herd_ipeds_crosswalk.csv")
+DB = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent / "data" / "federal_awards.db")))
+CROSSWALK = Path(__file__).parent.parent / "data" / "herd_ipeds_crosswalk.csv"
 
 UPSERT_SQL = """
 INSERT INTO herd_institutions (
