@@ -27,8 +27,11 @@ DB = Path("data/federal_awards.db")
 IPEDS = Path("data/ipeds/HD2023.csv")
 OUT = Path("data/herd_ipeds_crosswalk.csv")
 
-# Carnegie C18BASIC codes to include (doctoral + masters = HERD-eligible)
-RESEARCH_CODES = {"15", "16", "17", "18", "19", "20"}
+# Carnegie C18BASIC codes to include (doctoral + masters = HERD-eligible).
+# 25 = Special Focus Four-Year: Medical Schools & Health Science Centers.
+# Included so freestanding HSCs (e.g. UNT Health Science Center, UT Southwestern)
+# are independently selectable — never merged into a parent university's record.
+RESEARCH_CODES = {"15", "16", "17", "18", "19", "20", "25"}
 
 # Keyed by (INSTNM.strip(), STABBR) -> (awards_uei_or_None, reason)
 # None = confirmed not in awards DB, don't attempt name_match

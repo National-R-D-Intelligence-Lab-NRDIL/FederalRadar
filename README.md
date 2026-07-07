@@ -4,7 +4,7 @@ A grants intelligence platform for university research offices (VPR/AVP-Research
 Pulls federal award data from 13 agencies into a single SQLite database and surfaces
 competitive gap analysis — showing where peers are winning and by how much.
 
-**Current state:** 423,756 awards · $541B · FY2019–2026 · 13 agencies
+**Current state:** 424,097 awards · $541B · FY2019–2026 · 13 agencies
 
 ---
 
@@ -32,13 +32,15 @@ Federal Radar answers one primary question for VPR/AVP-Research offices:
 
 > **In [agency/program], where are peers beating us, and by how much?**
 
-Any of 1,005 research universities can be selected as the focal institution. The analysis
-compares that institution against a pre-configured peer group (Texas or National).
+Any of 1,059 research universities and health science centers can be selected as the focal
+institution. The analysis compares that institution against a pre-configured peer group
+(Texas or National).
 
 ### Dashboard Pages
 
 **Home — Competitive Gap Analysis**
-- Institution picker: select any HERD research university (1,005 institutions, filterable by state)
+- Institution picker: select any HERD research university or freestanding health science center
+  (1,059 institutions, filterable by state)
 - 4-metric scorecard: awards, funding, rank among peers, programs with gaps
 - Program breakdown table sorted by funding gap (all programs, peers side by side)
 - Bar chart, program activity heatmap, and funding flow Sankey diagram
@@ -86,26 +88,30 @@ Data Sources
     │
     ├── NSF API (nsf_api_fetcher.py)          → daily incremental
     ├── NSF Bulk ZIP (nsf_etl.py)             → historical backfill
-    ├── NIH RePORTER API (nih_api_fetcher.py) → fiscal year download
-    ├── USASpending Bulk Download             → fiscal year, per agency
+    ├── NIH RePORTER API (nih_api_fetcher.py) → fiscal year download + daily incremental
+    ├── USASpending Bulk Download             → fiscal year, per agency (historical backfill)
     │       (usaspending_api_fetcher.py)
-    └── Grants.gov XML Extract (fetch_grantsgov.py) → daily
+    ├── USASpending Advanced Search API       → daily incremental (all 11 non-NSF/NIH agencies,
+    │       (usaspending_api_fetcher.py)          one paginated call, rolling date window)
+    └── Grants.gov XML Extract (fetch_grantsgov.py) → daily (manual — not yet scheduled)
     │
     ▼
 SQLite DB (federal_awards.db)
     │
-    ├── awards             — 423K rows, all agencies, UEI-keyed
+    ├── awards             — 424K rows, all agencies, UEI-keyed
     ├── institutions       — 19,433 rows, canonical names, peer flags
-    ├── herd_institutions  — 1,053 IPEDS research universities → awards UEIs
+    ├── herd_institutions  — 1,108 IPEDS institutions → awards UEIs (1,059 matched)
     ├── opportunities      — Grants.gov NOFOs (posted + forecasted)
-    └── opportunity_cfdas  — junction: opportunities ↔ CFDA codes
+    ├── opportunity_cfdas  — junction: opportunities ↔ CFDA codes
+    └── refresh_log        — audit trail of every scheduled refresh run
     │
     ▼
 Streamlit App (app/Home.py + app/pages/)
     └── queries.py (all cached queries, peer constants, institution picker)
 ```
 
-**Deployment:** Railway. APScheduler runs daily NSF + NIH refresh.
+**Deployment:** Railway. APScheduler runs daily refresh: NSF (08:00 UTC), NIH (08:05 UTC),
+USASpending (08:10 UTC). Grants.gov is still a manual/one-time load — not yet on the scheduler.
 
 ---
 
@@ -123,7 +129,7 @@ The app opens at `http://localhost:8501`.
 | Control | Options |
 |---------|---------|
 | **State** | Filter institution list by state (optional) |
-| **Institution** | Any of 1,005 matched HERD research universities |
+| **Institution** | Any of 1,059 matched HERD research universities / health science centers |
 | **Agency** | nsf, nih, dod, doe, nasa, usda, ed, hhs, commerce, dot, neh, epa, dhs |
 | **Directorate / Division** | NSF only — optional drill-down |
 | **Institute** | NIH only — optional drill-down |
@@ -193,7 +199,7 @@ The app opens at `http://localhost:8501`.
 | `unitid` | TEXT PK | IPEDS unit ID |
 | `ipeds_name` | TEXT | IPEDS institution name |
 | `state` | TEXT | State abbreviation |
-| `carnegie` | TEXT | C18BASIC code (15=R1, 16=R2, 17=D/PU, 18–20=Master's) |
+| `carnegie` | TEXT | C18BASIC code (15=R1, 16=R2, 17=D/PU, 18–20=Master's, 25=Medical School/HSC) |
 | `awards_uei` | TEXT | Matched UEI in awards DB |
 | `awards_name` | TEXT | Canonical name in awards DB |
 | `match_type` | TEXT | `direct`, `secondary_uei`, `case_fix`, `manual`, `name_match`, `no_awards` |
@@ -310,17 +316,31 @@ After Phase 4, all awards have `inst_canonical_name` populated.
 
 ## HERD Institution Crosswalk
 
-Maps 1,053 IPEDS Carnegie 15–20 (doctoral + master's) institutions to their correct
-`inst_uei` in the awards database. Institutions often file under a different SAM.gov entity
-than their IPEDS registration (research foundations, system offices, etc.).
+Maps 1,108 IPEDS Carnegie 15–20 (doctoral + master's) and Carnegie 25 (freestanding medical
+schools / health science centers) institutions to their correct `inst_uei` in the awards
+database. Institutions often file under a different SAM.gov entity than their IPEDS
+registration (research foundations, system offices, etc.).
+
+**Business decision — HSCs are independently selectable, never merged into a parent
+university.** Many university systems (UNT, UT, Texas A&M, Texas Tech, Oklahoma, etc.) have
+a health science center that is legally, financially, and competitively distinct from the
+main campus, even though both fall under one system name. Carnegie code 25 institutions were
+originally excluded from the crosswalk (scope was doctoral/master's only), which meant
+UNT Health Science Center — and every other freestanding HSC nationally — had no way to be
+selected as its own focal institution, even though it is a separate line item in the awards
+data with its own UEI. Adding Carnegie 25 makes HSCs selectable as standalone institutions;
+it does **not** roll their awards up into the parent university, and `is_my_institution` in
+the `institutions` table is unaffected.
 
 ```bash
 python scripts/build_herd_crosswalk.py  # regenerates data/herd_ipeds_crosswalk.csv
 python scripts/load_herd_crosswalk.py   # loads CSV into herd_institutions table
 ```
 
-**Match rate:** 1,005 / 1,053 = 95.4%. All R1 (131) and R2 (134) institutions matched.
-Unmatched 48 are for-profits, theological colleges, and schools with no federal R&D.
+**Match rate:** 1,059 / 1,108 = 95.6%. All R1 (131) and R2 (134) institutions matched;
+54 / 55 Carnegie-25 medical schools/HSCs matched (only Mayo Clinic College of Medicine has
+no awards-DB presence). Remaining 49 unmatched are for-profits, theological colleges, and
+schools with no federal R&D.
 
 **Match priority:** direct UEI → secondary UEI → case normalization → manual override → keyword name search → no match
 
@@ -334,11 +354,11 @@ sqlite3 data/federal_awards.db "PRAGMA integrity_check;"
 
 # Record counts
 sqlite3 data/federal_awards.db "SELECT COUNT(*), ROUND(SUM(awd_amount)/1e9,2) FROM awards;"
-# Expected: ~423756 | 541.xx
+# Expected: ~424097 | 541.xx
 
 # HERD crosswalk
 sqlite3 data/federal_awards.db "SELECT COUNT(*), COUNT(awards_uei) FROM herd_institutions;"
-# Expected: 1053 | 1005
+# Expected: 1108 | 1059
 
 # Peer configuration
 sqlite3 data/federal_awards.db "
@@ -367,7 +387,7 @@ Federal Radar/
 │   └── queries.py                     All cached queries, peer config, HERD picker
 ├── data/
 │   ├── federal_awards.db              SQLite, WAL mode, ~2GB
-│   ├── herd_ipeds_crosswalk.csv       IPEDS → awards UEI crosswalk (1,053 rows)
+│   ├── herd_ipeds_crosswalk.csv       IPEDS → awards UEI crosswalk (1,108 rows)
 │   ├── ipeds/HD2023.csv               IPEDS institutional data (not in repo — download separately)
 │   └── raw/
 │       ├── grants_gov/                Daily Grants.gov JSONL extracts
@@ -392,7 +412,7 @@ Federal Radar/
 ├── tests/
 │   ├── test_data_governance.py        Governance test suite
 │   └── baselines.json                 Expected counts/totals
-├── scheduler.py                       APScheduler daily refresh (NSF + NIH)
+├── scheduler.py                       APScheduler daily refresh (NSF + NIH + USASpending)
 ├── railway.toml                       Railway deployment config
 ├── CONTEXT.md                         Full technical decision log
 └── README.md                          This file
