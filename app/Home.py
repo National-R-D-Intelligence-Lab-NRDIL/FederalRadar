@@ -69,6 +69,7 @@ from queries import (
     get_pis_for_program,
     get_raw_comparison,
     get_raw_comparison_by_fy,
+    get_recent_ingestion_activity,
     get_validation_stats,
 )
 
@@ -1012,3 +1013,26 @@ st.caption(
     f"{_freshness}"
     + (f" · Warnings: {'; '.join(_warnings)}" if _warnings else "")
 )
+
+with st.expander("Data ingestion detail (last 7 days)"):
+    _ingest_df = get_recent_ingestion_activity(days=7)
+    if _ingest_df.empty:
+        st.caption("No new records added to any agency in the last 7 days.")
+    else:
+        _total_new = int(_ingest_df["new_records"].sum())
+        _total_funding = _ingest_df["new_funding_m"].sum()
+        _n_agencies = _ingest_df["agency"].nunique()
+        st.caption(
+            f"{_total_new:,} new records (${_total_funding:,.1f}M) added "
+            f"across {_n_agencies} agencies in the last 7 days."
+        )
+        st.dataframe(
+            _ingest_df.rename(columns={
+                "day": "Date",
+                "agency": "Agency",
+                "new_records": "New Records",
+                "new_funding_m": "New Funding ($M)",
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )

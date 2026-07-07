@@ -1381,6 +1381,31 @@ def get_validation_stats(agency: str, fy_start: int, fy_end: int) -> dict:
     }
 
 
+@st.cache_data(ttl=3600)
+def get_recent_ingestion_activity(days: int = 7) -> pd.DataFrame:
+    """Per-agency, per-day count of newly inserted awards (not updates) and
+    the $ they add, over the last `days` days.
+
+    Uses created_at (set once at INSERT, never touched again by the upsert's
+    ON CONFLICT branch) rather than updated_at (touched on every upsert,
+    including re-fetches of unchanged records) — this is the ground-truth
+    signal that new data actually landed, not just that a job ran.
+    """
+    with _conn() as conn:
+        df = pd.read_sql_query(
+            """SELECT DATE(created_at) AS day,
+                      source AS agency,
+                      COUNT(*) AS new_records,
+                      ROUND(SUM(awd_amount) / 1e6, 2) AS new_funding_m
+               FROM awards
+               WHERE created_at >= DATE('now', ?)
+               GROUP BY day, agency
+               ORDER BY day DESC, agency""",
+            conn, params=(f"-{days} days",),
+        )
+    return df
+
+
 # ---------------------------------------------------------------------------
 # Portfolio Risk queries
 # ---------------------------------------------------------------------------
