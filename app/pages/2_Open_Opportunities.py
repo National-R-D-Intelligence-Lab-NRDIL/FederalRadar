@@ -348,7 +348,7 @@ else:
     })
     st.dataframe(
         gaps_display,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             **OPP_COL_CONFIG,
@@ -385,7 +385,7 @@ else:
     })
     st.dataframe(
         rev_display,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             **OPP_COL_CONFIG,

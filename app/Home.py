@@ -164,14 +164,28 @@ with st.sidebar:
     _inst_state = get_institution_state(selected_uei) or "??"
 
     if _is_unt_sidebar:
-        peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+        peer_set = st.radio("Peer Set", ["Texas", "National", "Both", "Custom"], index=0)
     else:
         _state_label = _inst_state
         peer_set = st.radio(
             "Peer Set",
-            [_state_label, "National", "Both"],
+            [_state_label, "National", "Both", "Custom"],
             index=0,
         )
+
+    if peer_set == "Custom":
+        _cdf = get_herd_institutions()
+        if _is_unt_sidebar:
+            _excl = set(get_my_ueis())
+        else:
+            _excl = {selected_uei}
+        _cdf = _cdf[~_cdf["awards_uei"].isin(_excl)].reset_index(drop=True)
+        _label_map = {}
+        for _row in _cdf.itertuples():
+            _lbl = f"{_row.ipeds_name} ({_row.state})"
+            _label_map[_lbl] = (_row.awards_name or _row.ipeds_name, _row.awards_uei)
+        _picked = st.multiselect("Select peer institutions", sorted(_label_map.keys()))
+        _custom_peer_items = [_label_map[p] for p in _picked]
 
     st.divider()
 
@@ -195,13 +209,19 @@ _all_my_ueis = tuple(get_my_ueis())
 _is_unt = selected_uei in _all_my_ueis
 my_ueis = _all_my_ueis if _is_unt else (selected_uei,)
 
-if _is_unt:
+if peer_set == "Custom":
+    peer_items = _custom_peer_items
+elif _is_unt:
     peer_items = get_peer_institutions(peer_set)
 else:
     # Dynamic KNN peers from HERD data
     _dyn_set = peer_set if peer_set in ("National", "Both") else get_institution_state(selected_uei)
     peer_items = get_dynamic_peers(selected_uei, _dyn_set, k=10)
 peer_ueis = tuple(uei for _, uei in peer_items)
+
+if not peer_ueis:
+    st.info("Select at least one peer institution to continue.")
+    st.stop()
 
 # Build short-label lookup: for UNT use hardcoded PEER_SHORT, for dynamic use _short_label
 _peer_short = dict(PEER_SHORT)  # start with hardcoded
@@ -496,7 +516,7 @@ styled = display.style.apply(_color_unt).apply(_color_trend).format({
     "Total Awards":     "{:,}",
 })
 
-st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
+st.dataframe(styled, width="stretch", height=min(650, 55 + 38 * len(display)))
 
 # CSV export for gap table
 _gap_csv = display.to_csv()
@@ -563,7 +583,7 @@ if agency in ("nsf", "nih"):
                 _pi_df["Total Funding"] = _pi_df["Total Funding"].map(_fmt_funding)
                 st.dataframe(
                     _pi_df,
-                    use_container_width=True,
+                    width="stretch",
                     column_config={
                         "First FY": st.column_config.NumberColumn(format="%d"),
                         "Last FY": st.column_config.NumberColumn(format="%d"),
@@ -620,7 +640,7 @@ fig.update_layout(
     yaxis={"categoryorder": "total ascending", "automargin": True},
     xaxis=dict(range=[0, _bar_max * 1.18]),
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 _pdf_fig_bar = fig
 
 # CSV export for funding comparison
@@ -736,7 +756,7 @@ else:
         xaxis=dict(side="top", title="", type="category"),
         yaxis=dict(title="", automargin=True),
     )
-    st.plotly_chart(fig_hm, use_container_width=True)
+    st.plotly_chart(fig_hm, width="stretch")
     _pdf_fig_hm = fig_hm
     _pdf_hm_h   = max(600, 32 * len(y_labels))
 
@@ -884,7 +904,7 @@ else:
             height=max(500, 28 * n_prog + 200),
             font=dict(size=12, family="Arial, Helvetica, sans-serif"),
         )
-        st.plotly_chart(fig_sk, use_container_width=True)
+        st.plotly_chart(fig_sk, width="stretch")
         _pdf_fig_sk = fig_sk
         _pdf_sk_h   = max(600, 28 * n_prog + 200)
 
@@ -1034,5 +1054,5 @@ with st.expander("Data ingestion detail (last 7 days)"):
                 "new_funding_m": "New Funding ($M)",
             }),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )

@@ -145,9 +145,12 @@ fig.update_layout(
     legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
     bargap=0.15,
     bargroupgap=0.05,
+    font=dict(color="#2c3e50", family="sans-serif"),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # =========================================================================
 # Agency selector → Sankey: Agency → Programs
@@ -364,10 +367,12 @@ if selected_program and not df_states.empty:
 fig_sankey.update_layout(
     height=sankey_height,
     margin=dict(t=20, b=20, l=20, r=20),
-    font=dict(size=11),
+    font=dict(size=11, color="#2c3e50", family="sans-serif"),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
 )
 
-st.plotly_chart(fig_sankey, use_container_width=True)
+st.plotly_chart(fig_sankey, width="stretch")
 
 # =========================================================================
 # Institution table (after state selection)
@@ -427,5 +432,5 @@ if selected_program and not df_states.empty:
             styled = df_show.style.map(
                 _style_change, subset=["Change"]
             ).apply(_style_unt_row, axis=1)
-            st.dataframe(styled, use_container_width=True,
+            st.dataframe(styled, width="stretch",
                          height=min(600, 55 + 38 * len(df_show)))
