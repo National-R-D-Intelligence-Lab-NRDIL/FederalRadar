@@ -12,6 +12,7 @@ import streamlit as st
 
 from queries import (
     MY_INSTITUTION,
+    get_herd_institutions,
     get_my_ueis,
     get_peer_institutions,
     get_peer_opportunity_gaps,
@@ -58,7 +59,18 @@ with st.sidebar:
     st.caption(MY_INSTITUTION)
     st.divider()
 
-    peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+    peer_set = st.radio("Peer Set", ["Texas", "National", "Both", "Custom"], index=0)
+
+    if peer_set == "Custom":
+        _cdf = get_herd_institutions()
+        _my_set = set(get_my_ueis())
+        _cdf = _cdf[~_cdf["awards_uei"].isin(_my_set)].reset_index(drop=True)
+        _label_map = {}
+        for _row in _cdf.itertuples():
+            _lbl = f"{_row.ipeds_name} ({_row.state})"
+            _label_map[_lbl] = (_row.awards_name or _row.ipeds_name, _row.awards_uei)
+        _picked = st.multiselect("Select peer institutions", sorted(_label_map.keys()))
+        _custom_peer_items = [_label_map[p] for p in _picked]
 
     status_choice = st.radio(
         "Solicitation Status",
@@ -86,11 +98,18 @@ else:
 # ---------------------------------------------------------------------------
 
 my_ueis    = tuple(get_my_ueis())
-peer_items = get_peer_institutions(peer_set)
+if peer_set == "Custom":
+    peer_items = _custom_peer_items
+else:
+    peer_items = get_peer_institutions(peer_set)
 peer_ueis  = tuple(uei for _, uei in peer_items)
 
 if not my_ueis:
     st.error("No UEIs found for UNT. Check the institutions table.")
+    st.stop()
+
+if not peer_ueis:
+    st.info("Select at least one peer institution to continue.")
     st.stop()
 
 df_gaps     = get_peer_opportunity_gaps(my_ueis, peer_ueis, status_filter, lookback_fy)

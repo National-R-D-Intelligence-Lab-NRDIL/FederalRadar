@@ -3,7 +3,16 @@ Action Dashboard — Federal Radar
 Where's the money and where do we submit?
 
 Cross-agency, forward-looking view fixed to FY2025-2026.
+
+DISABLED — commented out to reduce sidebar noise. Restore later if needed.
 """
+
+import streamlit as st
+st.set_page_config(page_title="Action Dashboard — Federal Radar", layout="wide")
+st.info("This page is temporarily disabled. It will return in a future release.")
+st.stop()
+
+"""  # noqa: E501 — entire page commented out below
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -13,6 +22,7 @@ from queries import (
     ED_EXCLUSION_NOTE,
     MY_INSTITUTION,
     PEER_SHORT,
+    get_herd_institutions,
     get_my_ueis,
     get_peer_institutions,
     get_agency_money_movement,
@@ -32,7 +42,18 @@ with st.sidebar:
     st.caption(MY_INSTITUTION)
     st.divider()
 
-    peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+    peer_set = st.radio("Peer Set", ["Texas", "National", "Both", "Custom"], index=0)
+
+    if peer_set == "Custom":
+        _cdf = get_herd_institutions()
+        _my_set = set(get_my_ueis())
+        _cdf = _cdf[~_cdf["awards_uei"].isin(_my_set)].reset_index(drop=True)
+        _label_map = {}
+        for _row in _cdf.itertuples():
+            _lbl = f"{_row.ipeds_name} ({_row.state})"
+            _label_map[_lbl] = (_row.awards_name or _row.ipeds_name, _row.awards_uei)
+        _picked = st.multiselect("Select peer institutions", sorted(_label_map.keys()))
+        _custom_peer_items = [_label_map[p] for p in _picked]
 
     st.divider()
     st.caption("All panels fixed to FY2025–2026 (current administration).")
@@ -42,11 +63,18 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 
 my_ueis = tuple(get_my_ueis())
-peer_items = get_peer_institutions(peer_set)
+if peer_set == "Custom":
+    peer_items = _custom_peer_items
+else:
+    peer_items = get_peer_institutions(peer_set)
 peer_ueis = tuple(uei for _, uei in peer_items)
 
 if not my_ueis:
     st.error("No UEIs found for UNT. Check the institutions table.")
+    st.stop()
+
+if not peer_ueis:
+    st.info("Select at least one peer institution to continue.")
     st.stop()
 
 st.markdown("# Action Dashboard")
@@ -336,3 +364,4 @@ with st.expander("Data Coverage & Freshness"):
 
         total_records = df_fresh["record_count"].sum()
         st.caption(f"Total: {total_records:,} award records across {len(df_fresh)} sources.")
+"""  # end of commented-out block

@@ -3,7 +3,16 @@ Portfolio Risk — Federal Radar
 Shows agency concentration risk and what-if scenario analysis.
 
 Primary question: How exposed are we if an agency gets cut?
+
+DISABLED — commented out to reduce sidebar noise. Restore later if needed.
 """
+
+import streamlit as st
+st.set_page_config(page_title="Portfolio Risk — Federal Radar", layout="wide")
+st.info("This page is temporarily disabled. It will return in a future release.")
+st.stop()
+
+"""  # noqa: E501 — entire page commented out below
 
 import pandas as pd
 import plotly.express as px
@@ -14,6 +23,7 @@ from queries import (
     MY_INSTITUTION,
     PEER_SHORT,
     get_fy_bounds,
+    get_herd_institutions,
     get_my_ueis,
     get_peer_institutions,
     get_portfolio_by_agency,
@@ -32,7 +42,18 @@ with st.sidebar:
     st.caption(MY_INSTITUTION)
     st.divider()
 
-    peer_set = st.radio("Peer Set", ["Texas", "National", "Both"], index=0)
+    peer_set = st.radio("Peer Set", ["Texas", "National", "Both", "Custom"], index=0)
+
+    if peer_set == "Custom":
+        _cdf = get_herd_institutions()
+        _my_set = set(get_my_ueis())
+        _cdf = _cdf[~_cdf["awards_uei"].isin(_my_set)].reset_index(drop=True)
+        _label_map = {}
+        for _row in _cdf.itertuples():
+            _lbl = f"{_row.ipeds_name} ({_row.state})"
+            _label_map[_lbl] = (_row.awards_name or _row.ipeds_name, _row.awards_uei)
+        _picked = st.multiselect("Select peer institutions", sorted(_label_map.keys()))
+        _custom_peer_items = [_label_map[p] for p in _picked]
 
     st.divider()
 
@@ -160,9 +181,16 @@ st.caption(
     "Sorted by top agency share (most concentrated first). UNT row highlighted."
 )
 
-peer_items = get_peer_institutions(peer_set)
+if peer_set == "Custom":
+    peer_items = _custom_peer_items
+else:
+    peer_items = get_peer_institutions(peer_set)
 peer_names = [label for label, _ in peer_items]
 all_names = [MY_INSTITUTION] + peer_names
+
+if not peer_names:
+    st.info("Select at least one peer institution to continue.")
+    st.stop()
 
 df_div = get_peer_diversification(tuple(all_names), fy_start, fy_end)
 
@@ -219,3 +247,4 @@ else:
         xaxis=dict(dtick=1),
     )
     st.plotly_chart(fig_trend, use_container_width=True)
+"""  # end of commented-out block

@@ -2013,3 +2013,244 @@ def get_data_freshness() -> pd.DataFrame:
     """
     with _conn() as conn:
         return pd.read_sql_query(sql, conn)
+
+
+# ---------------------------------------------------------------------------
+# Funding Landscape — field-wide drill-down queries
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def landscape_agency_trends(fy_end: int, n_years: int = 4) -> pd.DataFrame:
+    """Multi-year agency totals for the top bar chart.
+
+    Returns long-form: source | fiscal_year | total_m
+    """
+    fy_start = fy_end - n_years + 1
+    ed_clause, ed_params = _ed_exclusion_clause()
+    sql = """
+        SELECT source, fiscal_year,
+               ROUND(SUM(awd_amount) / 1e6, 0) AS total_m
+        FROM awards
+        WHERE fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+          AND {ed_clause}
+        GROUP BY source, fiscal_year
+        ORDER BY source, fiscal_year
+    """.format(ed_clause=ed_clause)
+    params = [fy_start, fy_end] + ed_params
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def landscape_agencies(fy: int) -> pd.DataFrame:
+    """Level 1: all agencies, current FY total vs prior FY, with UNT share."""
+    ed_clause, ed_params = _ed_exclusion_clause()
+    prior = fy - 1
+    sql = """
+        SELECT source,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_current,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_prior,
+               SUM(CASE WHEN fiscal_year = ? THEN 1 ELSE 0 END) AS awards_current,
+               COUNT(DISTINCT CASE WHEN fiscal_year = ?
+                     THEN COALESCE(inst_uei, inst_name) END) AS institutions_current
+        FROM awards
+        WHERE fiscal_year IN (?, ?)
+          AND awd_amount > 0
+          AND {ed_clause}
+        GROUP BY source
+        ORDER BY fy_current DESC
+    """.format(ed_clause=ed_clause)
+    params = [fy, prior, fy, fy, fy, prior] + ed_params
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    # UNT share for current FY
+    my_ueis = get_my_ueis()
+    if my_ueis:
+        ph = ",".join("?" * len(my_ueis))
+        sql_unt = f"""
+            SELECT source,
+                   COALESCE(SUM(awd_amount), 0) AS unt_current
+            FROM awards
+            WHERE fiscal_year = ?
+              AND inst_uei IN ({ph})
+              AND awd_amount > 0
+              AND {ed_clause}
+            GROUP BY source
+        """.format(ph=ph, ed_clause=ed_clause)
+        params_unt = [fy] + my_ueis + ed_params
+        with _conn() as conn:
+            df_unt = pd.read_sql_query(sql_unt, conn, params=params_unt)
+        df = df.merge(df_unt, on="source", how="left")
+        df["unt_current"] = df["unt_current"].fillna(0)
+    else:
+        df["unt_current"] = 0
+    return df
+
+
+@st.cache_data(ttl=3600)
+def landscape_programs_by_fy(agency: str, fy_end: int,
+                             n_years: int = 4) -> pd.DataFrame:
+    """Programs × fiscal years for the Sankey drill-down.
+
+    Returns: program_id | program | fiscal_year | total_m
+    """
+    fy_start = fy_end - n_years + 1
+    if agency == "nsf":
+        prog_col = "dir_abbr"
+        name_expr = "COALESCE(dir_full_name, dir_abbr)"
+    elif agency == "nih":
+        prog_col = "nih_institute"
+        name_expr = "nih_institute"
+    else:
+        prog_col = "opportunity_number"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
+
+    ed_clause, ed_params = _ed_exclusion_clause()
+    sql = """
+        SELECT {prog_col} AS program_id,
+               {name_expr} AS program,
+               fiscal_year,
+               ROUND(SUM(awd_amount) / 1e6, 1) AS total_m
+        FROM awards
+        WHERE source = ?
+          AND fiscal_year BETWEEN ? AND ?
+          AND awd_amount > 0
+          AND {prog_col} IS NOT NULL
+          AND TRIM({prog_col}) != ''
+          AND {ed_clause}
+        GROUP BY {prog_col}, {name_expr}, fiscal_year
+        ORDER BY total_m DESC
+    """.format(prog_col=prog_col, name_expr=name_expr, ed_clause=ed_clause)
+    params = [agency, fy_start, fy_end] + ed_params
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def landscape_programs(agency: str, fy: int) -> pd.DataFrame:
+    """Level 2: programs/institutes within an agency, current vs prior FY."""
+    prior = fy - 1
+    # Pick the right program column per agency
+    if agency == "nsf":
+        prog_col = "dir_abbr"
+        name_expr = "COALESCE(dir_full_name, dir_abbr)"
+    elif agency == "nih":
+        prog_col = "nih_institute"
+        name_expr = "nih_institute"
+    else:
+        prog_col = "opportunity_number"
+        name_expr = "COALESCE(cfda_title, opportunity_number)"
+
+    ed_clause, ed_params = _ed_exclusion_clause()
+    sql = """
+        SELECT {prog_col} AS program_id,
+               {name_expr} AS program,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_current,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_prior,
+               SUM(CASE WHEN fiscal_year = ? THEN 1 ELSE 0 END) AS awards_current,
+               COUNT(DISTINCT CASE WHEN fiscal_year = ?
+                     THEN COALESCE(inst_uei, inst_name) END) AS institutions_current
+        FROM awards
+        WHERE source = ?
+          AND fiscal_year IN (?, ?)
+          AND awd_amount > 0
+          AND {prog_col} IS NOT NULL
+          AND TRIM({prog_col}) != ''
+          AND {ed_clause}
+        GROUP BY {prog_col}, {name_expr}
+        ORDER BY fy_current DESC
+    """.format(prog_col=prog_col, name_expr=name_expr, ed_clause=ed_clause)
+    params = [fy, prior, fy, fy, agency, fy, prior] + ed_params
+    with _conn() as conn:
+        df = pd.read_sql_query(sql, conn, params=params)
+    # UNT share
+    my_ueis = get_my_ueis()
+    if my_ueis:
+        ph = ",".join("?" * len(my_ueis))
+        sql_unt = """
+            SELECT {prog_col} AS program_id,
+                   COALESCE(SUM(awd_amount), 0) AS unt_current
+            FROM awards
+            WHERE source = ? AND fiscal_year = ?
+              AND inst_uei IN ({ph})
+              AND awd_amount > 0
+              AND {ed_clause}
+            GROUP BY {prog_col}
+        """.format(prog_col=prog_col, ph=ph, ed_clause=ed_clause)
+        params_unt = [agency, fy] + my_ueis + ed_params
+        with _conn() as conn:
+            df_unt = pd.read_sql_query(sql_unt, conn, params=params_unt)
+        df = df.merge(df_unt, on="program_id", how="left")
+        df["unt_current"] = df["unt_current"].fillna(0)
+    else:
+        df["unt_current"] = 0
+    return df
+
+
+@st.cache_data(ttl=3600)
+def landscape_states(agency: str, program_id: str, fy: int) -> pd.DataFrame:
+    """Level 3: states receiving funding for a specific program, current vs prior FY."""
+    prior = fy - 1
+    if agency == "nsf":
+        prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "nih_institute"
+    else:
+        prog_col = "opportunity_number"
+
+    ed_clause, ed_params = _ed_exclusion_clause()
+    sql = """
+        SELECT inst_state_code AS state,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_current,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_prior,
+               SUM(CASE WHEN fiscal_year = ? THEN 1 ELSE 0 END) AS awards_current,
+               COUNT(DISTINCT CASE WHEN fiscal_year = ?
+                     THEN COALESCE(inst_uei, inst_name) END) AS institutions_current
+        FROM awards
+        WHERE source = ?
+          AND {prog_col} = ?
+          AND fiscal_year IN (?, ?)
+          AND awd_amount > 0
+          AND inst_state_code IS NOT NULL
+          AND {ed_clause}
+        GROUP BY inst_state_code
+        ORDER BY fy_current DESC
+    """.format(prog_col=prog_col, ed_clause=ed_clause)
+    params = [fy, prior, fy, fy, agency, program_id, fy, prior] + ed_params
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+@st.cache_data(ttl=3600)
+def landscape_institutions(agency: str, program_id: str, state: str,
+                           fy: int) -> pd.DataFrame:
+    """Level 4: institutions in a state for a specific program, current vs prior FY."""
+    prior = fy - 1
+    if agency == "nsf":
+        prog_col = "dir_abbr"
+    elif agency == "nih":
+        prog_col = "nih_institute"
+    else:
+        prog_col = "opportunity_number"
+
+    ed_clause, ed_params = _ed_exclusion_clause()
+    sql = """
+        SELECT COALESCE(inst_canonical_name, inst_name) AS institution,
+               inst_uei,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_current,
+               SUM(CASE WHEN fiscal_year = ? THEN awd_amount ELSE 0 END) AS fy_prior,
+               SUM(CASE WHEN fiscal_year = ? THEN 1 ELSE 0 END) AS awards_current
+        FROM awards
+        WHERE source = ?
+          AND {prog_col} = ?
+          AND inst_state_code = ?
+          AND fiscal_year IN (?, ?)
+          AND awd_amount > 0
+          AND {ed_clause}
+        GROUP BY COALESCE(inst_canonical_name, inst_name), inst_uei
+        ORDER BY fy_current DESC
+    """.format(prog_col=prog_col, ed_clause=ed_clause)
+    params = [fy, prior, fy, agency, program_id, state, fy, prior] + ed_params
+    with _conn() as conn:
+        return pd.read_sql_query(sql, conn, params=params)
