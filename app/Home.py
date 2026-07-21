@@ -881,8 +881,8 @@ else:
                 targets.append(inst_idx[inst])
                 values.append(val)
                 link_colors.append(
-                    "rgba(231, 76, 60, 0.35)" if inst == my_inst_name
-                    else "rgba(41, 128, 185, 0.25)"
+                    "rgba(231, 76, 60, 0.2)" if inst == my_inst_name
+                    else "rgba(41, 128, 185, 0.15)"
                 )
 
         fig_sk = go.Figure(go.Sankey(
@@ -898,11 +898,13 @@ else:
                 value=values,
                 color=link_colors,
             ),
+            textfont=dict(size=13, color="#000000", family="Arial, Helvetica, sans-serif"),
         ))
         fig_sk.update_layout(
             margin=dict(t=10, b=10, l=10, r=10),
             height=max(500, 28 * n_prog + 200),
-            font=dict(size=12, family="Arial, Helvetica, sans-serif"),
+            font=dict(size=13, color="#000000", family="Arial, Helvetica, sans-serif"),
+            paper_bgcolor="rgba(0,0,0,0)",
         )
         st.plotly_chart(fig_sk, width="stretch")
         _pdf_fig_sk = fig_sk

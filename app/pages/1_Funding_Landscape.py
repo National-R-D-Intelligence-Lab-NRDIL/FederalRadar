@@ -255,7 +255,7 @@ for year in fy_list:
         c = FY_COLORS.get(i, "#2c3e50")
         # Convert hex to rgba for link transparency
         r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
-        link_colors.append(f"rgba({r},{g},{b},0.35)")
+        link_colors.append(f"rgba({r},{g},{b},0.2)")
 
 # FY → Program links
 for year in fy_list:
@@ -269,14 +269,14 @@ for year in fy_list:
             sources.append(fy_indices[year])
             targets.append(pi)
             values.append(round(row["total_m"], 1))
-            link_colors.append(f"rgba({r},{g},{b},0.3)")
+            link_colors.append(f"rgba({r},{g},{b},0.15)")
         else:
             other_total += row["total_m"]
     if other_total > 0:
         sources.append(fy_indices[year])
         targets.append(other_prog_idx)
         values.append(round(other_total, 1))
-        link_colors.append("rgba(149,165,166,0.25)")
+        link_colors.append("rgba(149,165,166,0.12)")
 
 # Add state flow if a program is selected
 prog_select_options = [top_prog_names[pid] for pid in top_prog_ids]
@@ -312,9 +312,9 @@ if selected_program:
             targets.append(len(sankey_labels) - 1)
             values.append(round(srow["current_m"], 1))
             if srow["state"] == "TX":
-                link_colors.append("rgba(230,159,0,0.45)")
+                link_colors.append("rgba(230,159,0,0.2)")
             else:
-                link_colors.append("rgba(0,158,115,0.25)")
+                link_colors.append("rgba(0,158,115,0.15)")
 
         if rest_states > 0:
             sankey_labels.append("Other states")
@@ -322,7 +322,7 @@ if selected_program:
             sources.append(prog_idx)
             targets.append(len(sankey_labels) - 1)
             values.append(round(rest_states, 1))
-            link_colors.append("rgba(149,165,166,0.25)")
+            link_colors.append("rgba(149,165,166,0.12)")
 
 # --- Render Sankey ---
 # Use max(incoming, outgoing) to avoid double-counting intermediate nodes
@@ -358,6 +358,7 @@ fig_sankey = go.Figure(go.Sankey(
         customdata=[_short_label(v) for v in values],
         hovertemplate="%{source.label} → %{target.label}: %{customdata}<extra></extra>",
     ),
+    textfont=dict(size=12, color="#000000", family="Arial, sans-serif"),
 ))
 
 sankey_height = max(550, len(top_prog_ids) * 40 + 200)
@@ -367,7 +368,7 @@ if selected_program and not df_states.empty:
 fig_sankey.update_layout(
     height=sankey_height,
     margin=dict(t=20, b=20, l=20, r=20),
-    font=dict(size=11, color="#2c3e50", family="sans-serif"),
+    font=dict(size=12, color="#000000", family="Arial, sans-serif"),
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
 )
