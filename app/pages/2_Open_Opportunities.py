@@ -22,6 +22,16 @@ from queries import (
 st.set_page_config(page_title="Open Opportunities — Federal Radar", layout="wide")
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_m(m: float) -> str:
+    """Format a value already in millions as $XB or $XM."""
+    if m >= 1_000:
+        return f"${m / 1_000:.1f}B"
+    return f"${m:.0f}M"
+
+# ---------------------------------------------------------------------------
 # Peer name abbreviations for compact display
 # ---------------------------------------------------------------------------
 
@@ -258,13 +268,6 @@ def _parent_agency(code: str) -> str:
 # ---------------------------------------------------------------------------
 # Shared formatting helpers
 # ---------------------------------------------------------------------------
-
-def _fmt_m(m: float) -> str:
-    """Format a value already in millions as $XB or $XM."""
-    if m >= 1_000:
-        return f"${m / 1_000:.1f}B"
-    return f"${m:.0f}M"
-
 
 def fmt_ceiling(v) -> str:
     if pd.isna(v) or v == 0:
