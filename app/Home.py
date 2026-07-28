@@ -17,6 +17,22 @@ import streamlit as st
 # from pdf_export import generate_gap_report
 
 
+def _fmt_dollars(m: float) -> str:
+    """Auto-format a value in millions: $1.2B, $435M, $12M, $0.4M. Handles negatives."""
+    if m < 0:
+        return f"-{_fmt_dollars(-m)}"
+    if m >= 1000:
+        b = m / 1000
+        return f"${b:,.1f}B" if b != int(b) else f"${int(b):,}B"
+    if m >= 10:
+        return f"${m:,.0f}M"
+    if m >= 1:
+        return f"${m:.1f}M" if m != int(m) else f"${int(m)}M"
+    if m > 0:
+        return f"${m:.1f}M"
+    return "$0M"
+
+
 def _short_label(name: str) -> str:
     """Derive a compact display label from a full institution name."""
     s = name
@@ -69,6 +85,7 @@ from queries import (
     get_pis_for_program,
     get_raw_comparison,
     get_raw_comparison_by_fy,
+    get_data_freshness,
     get_recent_ingestion_activity,
     get_validation_stats,
 )
@@ -259,6 +276,25 @@ st.markdown(f"# {scope_label}")
 st.caption(f"FY{fy_start}–{fy_end}  ·  {peer_set} peers")
 
 # ---------------------------------------------------------------------------
+# Data freshness bar — visible at top of every page load
+# ---------------------------------------------------------------------------
+
+_freshness_df = get_data_freshness()
+if not _freshness_df.empty:
+    AGENCY_LABELS = {
+        "nih": "NIH", "nsf": "NSF", "ed": "Education", "dod": "DOD",
+        "doe": "DOE", "hhs": "HHS", "usda": "USDA", "nasa": "NASA",
+        "commerce": "Commerce", "dot": "DOT", "epa": "EPA",
+        "neh": "NEH", "dhs": "DHS",
+    }
+    _freshness_parts = []
+    for _, _fr in _freshness_df.iterrows():
+        _lbl = AGENCY_LABELS.get(_fr["source"], _fr["source"].upper())
+        _date = (_fr["last_refresh_at"] or "")[:10]
+        _freshness_parts.append(f"**{_lbl}:** {_date or 'unknown'}")
+    st.caption("Data last refreshed — " + "  ·  ".join(_freshness_parts))
+
+# ---------------------------------------------------------------------------
 # Handle unsupported agency or empty data
 # ---------------------------------------------------------------------------
 
@@ -339,7 +375,7 @@ else:
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(f"{my_col_label} Awards",  f"{unt_total_awards:,}")
-c2.metric(f"{my_col_label} Funding", f"${unt_total_funding:.1f}M")
+c2.metric(f"{my_col_label} Funding", _fmt_dollars(unt_total_funding))
 c3.metric("Rank Among Peers",        f"#{unt_rank} of {n_ranked}" if unt_rank else "—")
 c4.metric("Programs with Gaps",      str(n_gaps))
 
@@ -373,7 +409,7 @@ if peer_cols:
             f"peers average **{peer_avg_top:.0f}** "
             f"({top_peer_name} leads with **{top_peer_count}**). "
             f"If {my_col_label} matched the peer average, it would represent "
-            f"an additional **${gap_m_top:.1f}M** in funding."
+            f"an additional **{_fmt_dollars(gap_m_top)}** in funding."
         )
         st.markdown(_headline)
     else:
@@ -512,11 +548,11 @@ def _color_unt(col):
 
 styled = display.style.apply(_color_unt).apply(_color_trend).format({
     "Peer Avg":         "{:.1f}",
-    "Opportunity ($M)": "${:.2f}M",
+    "Opportunity ($M)": _fmt_dollars,
     "Total Awards":     "{:,}",
 })
 
-st.dataframe(styled, width="stretch", height=min(650, 55 + 38 * len(display)))
+st.dataframe(styled, use_container_width=True, height=min(650, 55 + 38 * len(display)))
 
 # CSV export for gap table
 _gap_csv = display.to_csv()
@@ -575,7 +611,7 @@ if agency in ("nsf", "nih"):
             else:
                 def _fmt_funding(v):
                     if v >= 1e6:
-                        return f"${v / 1e6:.2f}M"
+                        return _fmt_dollars(v / 1e6)
                     if v >= 1e3:
                         return f"${v / 1e3:.2f}K"
                     return f"${v:,.0f}"
@@ -583,7 +619,7 @@ if agency in ("nsf", "nih"):
                 _pi_df["Total Funding"] = _pi_df["Total Funding"].map(_fmt_funding)
                 st.dataframe(
                     _pi_df,
-                    width="stretch",
+                    use_container_width=True,
                     column_config={
                         "First FY": st.column_config.NumberColumn(format="%d"),
                         "Last FY": st.column_config.NumberColumn(format="%d"),
@@ -613,23 +649,23 @@ bar_data = (
     )
     .sort_values("Funding ($M)", ascending=True)
 )
-
-colors = ["#e74c3c" if is_unt else "#2980b9" for is_unt in bar_data["IsUNT"]]
+bar_data["Funding_fmt"] = bar_data["Funding ($M)"].map(_fmt_dollars)
 
 fig = px.bar(
     bar_data,
     x="Funding ($M)",
     y="Label",
+    text="Funding_fmt",
     orientation="h",
     labels={"Label": "", "Funding ($M)": "Total Funding ($M)"},
     color="IsUNT",
     color_discrete_map={True: "#e74c3c", False: "#2980b9"},
 )
 fig.update_traces(
-    text=bar_data["Funding ($M)"].map(lambda x: f"${x:.1f}M"),
     textposition="outside",
     textfont=dict(size=9),
     cliponaxis=False,
+    hovertemplate="%{y}: %{text}<extra></extra>",
 )
 _bar_label_w = max((len(str(lbl)) for lbl in bar_data["Label"]), default=10) * 7
 _bar_max = bar_data["Funding ($M)"].max() if not bar_data.empty else 1
@@ -637,10 +673,10 @@ fig.update_layout(
     showlegend=False,
     margin=dict(t=10, b=10, l=_bar_label_w, r=80),
     height=max(300, 30 * len(bar_data)),
-    yaxis={"categoryorder": "total ascending", "automargin": True},
+    yaxis={"categoryorder": "array", "categoryarray": bar_data["Label"].tolist(), "automargin": True},
     xaxis=dict(range=[0, _bar_max * 1.18]),
 )
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, use_container_width=True)
 _pdf_fig_bar = fig
 
 # CSV export for funding comparison
@@ -715,19 +751,21 @@ else:
             values="unt_funding_m", aggfunc="sum", fill_value=0,
         ).reindex(index=row_order, columns=hm_z.columns, fill_value=0)
 
-    # Build customdata for hover: [raw_z, unt_funding_m]
+    # Build customdata for hover: [raw_z, unt_funding_m, fmt_field, fmt_unt]
     z_raw = hm_z.values
-    if hm_unt_funding is not None:
-        customdata = np.stack([z_raw, hm_unt_funding.values], axis=-1)
-    else:
-        customdata = np.stack([z_raw, np.zeros_like(z_raw)], axis=-1)
+    unt_raw = hm_unt_funding.values if hm_unt_funding is not None else np.zeros_like(z_raw)
+    customdata = np.empty((*z_raw.shape, 4), dtype=object)
+    customdata[..., 0] = z_raw
+    customdata[..., 1] = unt_raw
+    customdata[..., 2] = np.vectorize(_fmt_dollars)(z_raw)
+    customdata[..., 3] = np.vectorize(_fmt_dollars)(unt_raw)
 
     if hm_metric == "Funding ($M)":
         hover_tpl = (
             "<b>%{y}</b><br>"
             "FY%{x}<br>"
-            "Field: $%{customdata[0]:.1f}M<br>"
-            f"{my_col_label}: $%{{customdata[1]:.1f}}M (awards: %{{text}})<extra></extra>"
+            "Field: %{customdata[2]}<br>"
+            f"{my_col_label}: %{{customdata[3]}} (awards: %{{text}})<extra></extra>"
         )
     else:
         hover_tpl = (
@@ -756,7 +794,7 @@ else:
         xaxis=dict(side="top", title="", type="category"),
         yaxis=dict(title="", automargin=True),
     )
-    st.plotly_chart(fig_hm, width="stretch")
+    st.plotly_chart(fig_hm, use_container_width=True)
     _pdf_fig_hm = fig_hm
     _pdf_hm_h   = max(600, 32 * len(y_labels))
 
@@ -790,18 +828,6 @@ else:
     if df_sk.empty:
         st.info("No data available for Sankey in this filter combination.")
     else:
-        def _fmt_dollars(m: float) -> str:
-            """Auto-format a value in millions: $1.2B, $435M, $12M, $0.4M."""
-            if m >= 1000:
-                b = m / 1000
-                return f"${b:,.1f}B" if b != int(b) else f"${int(b):,}B"
-            if m >= 10:
-                return f"${m:,.0f}M"
-            if m >= 1:
-                return f"${m:.1f}M" if m != int(m) else f"${int(m)}M"
-            if m > 0:
-                return f"${m:.1f}M"
-            return "$0M"
 
         # Programs sorted by total activity descending
         prog_totals = df_sk.groupby("program_abbr")[val_col].sum()
@@ -906,7 +932,7 @@ else:
             font=dict(size=13, color="#000000", family="Arial, Helvetica, sans-serif"),
             paper_bgcolor="rgba(0,0,0,0)",
         )
-        st.plotly_chart(fig_sk, width="stretch")
+        st.plotly_chart(fig_sk, use_container_width=True)
         _pdf_fig_sk = fig_sk
         _pdf_sk_h   = max(600, 28 * n_prog + 200)
 
@@ -1031,7 +1057,7 @@ _freshness = (
 )
 st.caption(
     f"**Data Quality** · {_vstats['total_records']:,} records · "
-    f"${_vstats['total_funding_m']:,.1f}M total funding · "
+    f"{_fmt_dollars(_vstats['total_funding_m'])} total funding · "
     f"{_freshness}"
     + (f" · Warnings: {'; '.join(_warnings)}" if _warnings else "")
 )
@@ -1045,7 +1071,7 @@ with st.expander("Data ingestion detail (last 7 days)"):
         _total_funding = _ingest_df["new_funding_m"].sum()
         _n_agencies = _ingest_df["agency"].nunique()
         st.caption(
-            f"{_total_new:,} new records (${_total_funding:,.1f}M) added "
+            f"{_total_new:,} new records ({_fmt_dollars(_total_funding)}) added "
             f"across {_n_agencies} agencies in the last 7 days."
         )
         st.dataframe(
@@ -1056,5 +1082,5 @@ with st.expander("Data ingestion detail (last 7 days)"):
                 "new_funding_m": "New Funding ($M)",
             }),
             hide_index=True,
-            width="stretch",
+            use_container_width=True,
         )

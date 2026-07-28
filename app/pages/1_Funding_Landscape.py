@@ -150,7 +150,7 @@ fig.update_layout(
     plot_bgcolor="rgba(0,0,0,0)",
 )
 
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig, use_container_width=True)
 
 # =========================================================================
 # Agency selector → Sankey: Agency → Programs
@@ -278,51 +278,6 @@ for year in fy_list:
         values.append(round(other_total, 1))
         link_colors.append("rgba(149,165,166,0.12)")
 
-# Add state flow if a program is selected
-prog_select_options = [top_prog_names[pid] for pid in top_prog_ids]
-prog_name_to_id = {v: k for k, v in top_prog_names.items()}
-
-selected_program = st.selectbox(
-    "Select a program to see state distribution",
-    options=[""] + prog_select_options,
-    index=0,
-    key="program_select",
-)
-
-if selected_program:
-    selected_program_id = prog_name_to_id[selected_program]
-    df_states = landscape_states(selected_agency, selected_program_id, fy)
-
-    if not df_states.empty:
-        df_states["current_m"] = df_states["fy_current"] / 1e6
-        top_states = df_states.head(15).copy()
-        rest_states = (
-            df_states.iloc[15:]["current_m"].sum() if len(df_states) > 15 else 0
-        )
-
-        prog_idx = prog_indices[selected_program_id]
-
-        for _, srow in top_states.iterrows():
-            sankey_labels.append(srow["state"])
-            if srow["state"] == "TX":
-                sankey_colors.append("#E69F00")  # amber — stands out
-            else:
-                sankey_colors.append("#009E73")  # teal
-            sources.append(prog_idx)
-            targets.append(len(sankey_labels) - 1)
-            values.append(round(srow["current_m"], 1))
-            if srow["state"] == "TX":
-                link_colors.append("rgba(230,159,0,0.2)")
-            else:
-                link_colors.append("rgba(0,158,115,0.15)")
-
-        if rest_states > 0:
-            sankey_labels.append("Other states")
-            sankey_colors.append("#95a5a6")
-            sources.append(prog_idx)
-            targets.append(len(sankey_labels) - 1)
-            values.append(round(rest_states, 1))
-            link_colors.append("rgba(149,165,166,0.12)")
 
 # --- Render Sankey ---
 # Use max(incoming, outgoing) to avoid double-counting intermediate nodes
@@ -362,8 +317,6 @@ fig_sankey = go.Figure(go.Sankey(
 ))
 
 sankey_height = max(550, len(top_prog_ids) * 40 + 200)
-if selected_program and not df_states.empty:
-    sankey_height = max(600, min(len(top_states), 15) * 35 + 300)
 
 fig_sankey.update_layout(
     height=sankey_height,
@@ -373,65 +326,149 @@ fig_sankey.update_layout(
     plot_bgcolor="rgba(0,0,0,0)",
 )
 
-st.plotly_chart(fig_sankey, width="stretch")
+st.plotly_chart(fig_sankey, use_container_width=True)
 
 # =========================================================================
-# Institution table (after state selection)
+# Program selector → focused Sankey: Program → States only
 # =========================================================================
 
-if selected_program and not df_states.empty:
-    st.divider()
+prog_select_options = [top_prog_names[pid] for pid in top_prog_ids]
+prog_name_to_id = {v: k for k, v in top_prog_names.items()}
 
-    state_list = df_states.sort_values("fy_current", ascending=False)["state"].tolist()
-    default_idx = (state_list.index("TX") + 1) if "TX" in state_list else 0
+selected_program = st.selectbox(
+    "Select a program to see state distribution",
+    options=[""] + prog_select_options,
+    index=0,
+    key="program_select",
+)
 
-    selected_state = st.selectbox(
-        "Select a state to see institutions",
-        options=[""] + state_list,
-        index=default_idx,
-        key="state_select",
-    )
+if selected_program:
+    selected_program_id = prog_name_to_id[selected_program]
+    df_states = landscape_states(selected_agency, selected_program_id, fy)
 
-    if selected_state:
-        df_inst = landscape_institutions(
-            selected_agency, selected_program_id, selected_state, fy
+    if df_states.empty:
+        st.info(f"No state data for {selected_program} in FY{fy}.")
+    else:
+        df_states["current_m"] = df_states["fy_current"] / 1e6
+        top_states = df_states.head(15).copy()
+        rest_states = df_states.iloc[15:]["current_m"].sum() if len(df_states) > 15 else 0.0
+
+        # --- Focused Sankey: single program → states ---
+        foc_labels = [selected_program]
+        foc_colors = ["#2c3e50"]
+        foc_sources, foc_targets, foc_values, foc_link_colors = [], [], [], []
+
+        for _, srow in top_states.iterrows():
+            foc_labels.append(srow["state"])
+            if srow["state"] == "TX":
+                foc_colors.append("#E69F00")
+                foc_link_colors.append("rgba(230,159,0,0.3)")
+            else:
+                foc_colors.append("#009E73")
+                foc_link_colors.append("rgba(0,158,115,0.2)")
+            foc_sources.append(0)
+            foc_targets.append(len(foc_labels) - 1)
+            foc_values.append(round(srow["current_m"], 1))
+
+        if rest_states > 0:
+            foc_labels.append("Other states")
+            foc_colors.append("#95a5a6")
+            foc_link_colors.append("rgba(149,165,166,0.15)")
+            foc_sources.append(0)
+            foc_targets.append(len(foc_labels) - 1)
+            foc_values.append(round(rest_states, 1))
+
+        foc_node_in = [0.0] * len(foc_labels)
+        foc_node_out = [0.0] * len(foc_labels)
+        for s, t, v in zip(foc_sources, foc_targets, foc_values):
+            foc_node_out[s] += v
+            foc_node_in[t] += v
+        foc_node_vals = [max(i, o) for i, o in zip(foc_node_in, foc_node_out)]
+        foc_display = [
+            f"{foc_labels[i]}  {_short_label(foc_node_vals[i])}"
+            for i in range(len(foc_labels))
+        ]
+
+        fig_focused = go.Figure(go.Sankey(
+            arrangement="snap",
+            node=dict(
+                pad=14, thickness=25,
+                label=foc_display, color=foc_colors,
+                customdata=[_short_label(v) for v in foc_node_vals],
+                hovertemplate="%{customdata}<extra></extra>",
+            ),
+            link=dict(
+                source=foc_sources, target=foc_targets, value=foc_values,
+                color=foc_link_colors,
+                customdata=[_short_label(v) for v in foc_values],
+                hovertemplate="%{source.label} → %{target.label}: %{customdata}<extra></extra>",
+            ),
+            textfont=dict(size=12, color="#000000", family="Arial, sans-serif"),
+        ))
+        fig_focused.update_layout(
+            height=max(400, len(foc_labels) * 32 + 100),
+            margin=dict(t=20, b=20, l=20, r=20),
+            font=dict(size=12, color="#000000", family="Arial, sans-serif"),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_focused, use_container_width=True)
+
+        # =====================================================================
+        # Institution table
+        # =====================================================================
+
+        st.divider()
+        state_list = df_states.sort_values("fy_current", ascending=False)["state"].tolist()
+        default_idx = (state_list.index("TX") + 1) if "TX" in state_list else 0
+
+        selected_state = st.selectbox(
+            "Select a state to see institutions",
+            options=[""] + state_list,
+            index=default_idx,
+            key="state_select",
         )
 
-        if df_inst.empty:
-            st.info(f"No institutions in {selected_state} for "
-                    f"{selected_program} in FY{fy}.")
-        else:
-            df_inst["current_m"] = df_inst["fy_current"] / 1e6
-            df_inst["prior_m"] = df_inst["fy_prior"] / 1e6
-            df_inst["pct"] = df_inst.apply(
-                lambda r: _pct_change(r["fy_current"], r["fy_prior"]), axis=1
+        if selected_state:
+            df_inst = landscape_institutions(
+                selected_agency, selected_program_id, selected_state, fy
             )
 
-            total_st = df_inst["current_m"].sum()
-            st.caption(
-                f"**{selected_program}** awarded **{_short_label(total_st)}** "
-                f"to {len(df_inst)} institutions in {selected_state} in FY{fy}."
-            )
+            if df_inst.empty:
+                st.info(f"No institutions in {selected_state} for "
+                        f"{selected_program} in FY{fy}.")
+            else:
+                df_inst["current_m"] = df_inst["fy_current"] / 1e6
+                df_inst["prior_m"] = df_inst["fy_prior"] / 1e6
+                df_inst["pct"] = df_inst.apply(
+                    lambda r: _pct_change(r["fy_current"], r["fy_prior"]), axis=1
+                )
 
-            tbl = df_inst.copy()
-            tbl["Institution"] = tbl["institution"]
-            tbl[f"FY{fy}"] = tbl["current_m"].apply(_short_label)
-            tbl[f"FY{fy - 1}"] = tbl["prior_m"].apply(_short_label)
-            tbl["Change"] = tbl["pct"].apply(_change_str)
-            tbl["Awards"] = tbl["awards_current"].astype(int)
+                total_st = df_inst["current_m"].sum()
+                st.caption(
+                    f"**{selected_program}** awarded **{_short_label(total_st)}** "
+                    f"to {len(df_inst)} institutions in {selected_state} in FY{fy}."
+                )
 
-            cols = ["Institution", f"FY{fy}", f"FY{fy - 1}", "Change", "Awards"]
-            df_show = tbl[cols].reset_index(drop=True)
-            df_show.index = range(1, len(df_show) + 1)
+                tbl = df_inst.copy()
+                tbl["Institution"] = tbl["institution"]
+                tbl[f"FY{fy}"] = tbl["current_m"].apply(_short_label)
+                tbl[f"FY{fy - 1}"] = tbl["prior_m"].apply(_short_label)
+                tbl["Change"] = tbl["pct"].apply(_change_str)
+                tbl["Awards"] = tbl["awards_current"].astype(int)
 
-            def _style_unt_row(row):
-                idx = row.name - 1
-                if idx < len(df_inst) and df_inst.iloc[idx]["inst_uei"] in my_ueis:
-                    return ["background-color: #fef9e7; font-weight: bold"] * len(row)
-                return [""] * len(row)
+                cols = ["Institution", f"FY{fy}", f"FY{fy - 1}", "Change", "Awards"]
+                df_show = tbl[cols].reset_index(drop=True)
+                df_show.index = range(1, len(df_show) + 1)
 
-            styled = df_show.style.map(
-                _style_change, subset=["Change"]
-            ).apply(_style_unt_row, axis=1)
-            st.dataframe(styled, width="stretch",
-                         height=min(600, 55 + 38 * len(df_show)))
+                def _style_unt_row(row):
+                    idx = row.name - 1
+                    if idx < len(df_inst) and df_inst.iloc[idx]["inst_uei"] in my_ueis:
+                        return ["background-color: #fef9e7; font-weight: bold"] * len(row)
+                    return [""] * len(row)
+
+                styled = df_show.style.map(
+                    _style_change, subset=["Change"]
+                ).apply(_style_unt_row, axis=1)
+                st.dataframe(styled, use_container_width=True,
+                             height=min(600, 55 + 38 * len(df_show)))

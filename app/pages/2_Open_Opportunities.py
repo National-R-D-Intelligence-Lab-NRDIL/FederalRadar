@@ -182,7 +182,7 @@ c3.metric(
     delta_color="inverse" if (gap_closing + rev_closing) else "off",
 )
 c4.metric(
-    "Peer Awards in Gap Programs", f"${gap_peer_m:,.1f}M",
+    "Peer Awards in Gap Programs", _fmt_m(gap_peer_m),
     help=f"Total peer funding under gap programs since FY{lookback_fy}",
 )
 
@@ -259,10 +259,17 @@ def _parent_agency(code: str) -> str:
 # Shared formatting helpers
 # ---------------------------------------------------------------------------
 
+def _fmt_m(m: float) -> str:
+    """Format a value already in millions as $XB or $XM."""
+    if m >= 1_000:
+        return f"${m / 1_000:.1f}B"
+    return f"${m:.0f}M"
+
+
 def fmt_ceiling(v) -> str:
     if pd.isna(v) or v == 0:
         return "—"
-    return f"${v / 1e6:,.1f}M"
+    return _fmt_m(v / 1e6)
 
 
 def fmt_close(row) -> str:
@@ -298,11 +305,11 @@ def fmt_status(s: str) -> str:
 
 def fmt_peers(names_str: str, inst_count: int, total_m: float) -> str:
     if not names_str:
-        return f"{inst_count} peers · ${total_m:.1f}M"
+        return f"{inst_count} peers · {_fmt_m(total_m)}"
     names = [n.strip() for n in names_str.split(",")]
     short = [PEER_SHORT.get(n, n[:12]) for n in names[:3]]
     suffix = f" +{len(names) - 3}" if len(names) > 3 else ""
-    return f"{', '.join(short)}{suffix} · ${total_m:.1f}M"
+    return f"{', '.join(short)}{suffix} · {_fmt_m(total_m)}"
 
 
 OPP_COL_CONFIG = {
@@ -378,7 +385,7 @@ else:
         "Max Award":     df_revisits["award_ceiling"].apply(fmt_ceiling),
         "Est. # Funded": df_revisits["expected_number_of_awards"].apply(fmt_awards),
         "UNT History":   df_revisits.apply(
-            lambda r: f"{int(r['unt_award_count'])} awards · ${r['unt_total_m']:.1f}M · last FY{int(r['unt_last_fy'])}",
+            lambda r: f"{int(r['unt_award_count'])} awards · {_fmt_m(r['unt_total_m'])} · last FY{int(r['unt_last_fy'])}",
             axis=1,
         ),
         "Opp #":         df_revisits["opportunity_number"].fillna("—"),
