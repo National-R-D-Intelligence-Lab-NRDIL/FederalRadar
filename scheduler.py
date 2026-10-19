@@ -108,11 +108,19 @@ if __name__ == "__main__":
     scheduler.add_job(run_grantsgov_refresh, "cron", hour=8, minute=15)
 
     print("[scheduler] Starting. Will run NSF at 08:00, NIH at 08:05, Grants.gov at 08:15 UTC daily.", flush=True)
-    print("[scheduler] Running NSF refresh now...", flush=True)
-    run_nsf_refresh()
-    print("[scheduler] Running NIH refresh now...", flush=True)
-    run_nih_refresh()
-    print("[scheduler] Running Grants.gov refresh now...", flush=True)
-    run_grantsgov_refresh()
+    # Each startup run is isolated -- a failure in one (e.g. a schema
+    # mismatch) must not crash the container and take Streamlit down with
+    # it (the Procfile's `wait -n` exits the whole container if any one
+    # of its processes dies).
+    for label, job in (
+        ("NSF", run_nsf_refresh),
+        ("NIH", run_nih_refresh),
+        ("Grants.gov", run_grantsgov_refresh),
+    ):
+        print(f"[scheduler] Running {label} refresh now...", flush=True)
+        try:
+            job()
+        except Exception as e:
+            print(f"[scheduler] {label} startup refresh failed, continuing: {e}", flush=True)
 
     scheduler.start()

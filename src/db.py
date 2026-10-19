@@ -124,7 +124,6 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_awards_inst_name       ON awards(inst_name);",
     "CREATE INDEX IF NOT EXISTS idx_awards_inst_state      ON awards(inst_state_code);",
     "CREATE INDEX IF NOT EXISTS idx_awards_agcy_id         ON awards(agcy_id);",
-    "CREATE INDEX IF NOT EXISTS idx_awards_opportunity_num ON awards(opportunity_number);",
     "CREATE INDEX IF NOT EXISTS idx_awards_activity_code   ON awards(activity_code);",
     "CREATE INDEX IF NOT EXISTS idx_awards_nih_institute   ON awards(nih_institute);",
     # Composite indexes for common VPR query patterns
@@ -141,29 +140,26 @@ CREATE_INDEXES_SQL = [
     # Canonical name queries (get_scoped_pis, peer diversification)
     "CREATE INDEX IF NOT EXISTS idx_awards_canonical_src_fy  ON awards(inst_canonical_name, source, fiscal_year);",
     # ── NIH-SPECIFIC ─────────────────────────────────────────────────────────
-    # Heatmap + field_wide_stats (all-institution NIH scans)
-    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_nih     ON awards(source, fiscal_year, nih_institute);",
-    # get_nih_institutes DISTINCT (sidebar dropdown)
-    "CREATE INDEX IF NOT EXISTS idx_awards_source_nih        ON awards(source, nih_institute);",
     # Covering index for GROUP BY nih_institute with a fiscal_year RANGE filter
-    # (get_field_wide_stats, no institute_filter) -- fiscal_year as the 2nd
-    # column of idx_awards_source_fy_nih can't drive the GROUP BY (it's a
-    # range, not an equality), forcing a temp B-tree sort that's cheap on
-    # NSF's smaller table but ~70s on NIH's 481K rows. nih_institute as the
-    # 2nd column here lets SQLite group by index order with no sort step.
+    # (get_field_wide_stats/get_heatmap_data, no institute_filter) -- also
+    # covers the institute_filter equality case and the sidebar's DISTINCT
+    # nih_institute lookup, since (source, nih_institute, fiscal_year) is a
+    # valid prefix for both. Superseded the old (source, fiscal_year,
+    # nih_institute) and (source, nih_institute) indexes, which forced a
+    # temp B-tree sort on GROUP BY -- cheap on NSF's smaller table but ~70s
+    # on NIH's 481K rows (confirmed live); both dropped 2026-10-18.
     "CREATE INDEX IF NOT EXISTS idx_awards_source_nih_fy     ON awards(source, nih_institute, fiscal_year);",
     # ── NSF-SPECIFIC ─────────────────────────────────────────────────────────
-    # Directorate-level queries (top-level NSF)
-    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_dir     ON awards(source, fiscal_year, dir_abbr);",
     # Same covering-index fix as idx_awards_source_nih_fy, for dir_abbr.
+    # Supersedes the old (source, fiscal_year, dir_abbr) index, dropped 2026-10-18.
     "CREATE INDEX IF NOT EXISTS idx_awards_source_dir_fy     ON awards(source, dir_abbr, fiscal_year);",
     # Division-level queries (NSF drill-down)
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_div     ON awards(source, fiscal_year, div_abbr);",
     # Program element queries (NSF deepest level)
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_pgm     ON awards(source, fiscal_year, pgm_ele_name);",
-    # ── USASPENDING AGENCIES (DOD, DOE, NASA, ED, USDA, DOT, NEH, EPA, DHS) ──
-    # CFDA / opportunity number queries
-    "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_opp     ON awards(source, fiscal_year, opportunity_number);",
+    # idx_awards_opportunity_num and idx_awards_source_fy_opp (CFDA/opportunity_number,
+    # for the now-dropped USASpending agencies) removed 2026-10-18 -- no source
+    # left populates opportunity_number for filtering/grouping purposes.
 ]
 
 
