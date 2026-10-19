@@ -14,7 +14,7 @@ DB_PATH = Path(os.environ.get("DATABASE_PATH", str(Path(__file__).parent.parent 
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS awards (
-    awd_id                  TEXT PRIMARY KEY,
+    awd_id                  TEXT NOT NULL,
     awd_titl_txt            TEXT NOT NULL,
     inst_name               TEXT,
     inst_state_code         TEXT,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS awards (
     pgm_ele_name            TEXT,
     pi_name                 TEXT,
     agcy_id                 TEXT,
-    fiscal_year             INTEGER,
+    fiscal_year             INTEGER NOT NULL,
     raw_json                TEXT,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS awards (
     -- Derived from raw_json at load time (avoids needing raw_json for display)
     dir_full_name           TEXT,   -- NSF directorate full name
     div_full_name           TEXT,   -- NSF division full name
-    cfda_title               TEXT    -- USASpending/ED CFDA program title
+    cfda_title               TEXT,   -- USASpending/ED CFDA program title
+    -- Grain is one row per award PER FISCAL YEAR (not one row per award) --
+    -- a multi-year grant has one row for each year it received money.
+    -- awd_amount is that year's own amount, never a lifetime total.
+    PRIMARY KEY (awd_id, fiscal_year)
 );
 """
 
@@ -76,16 +80,14 @@ INSERT INTO awards (
     :dir_abbr, :div_abbr, :pgm_ele_name, :pi_name,
     :agcy_id, :fiscal_year, :raw_json, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
     :source, :opportunity_number, :activity_code, :nih_institute, :direct_cost_amt
-) ON CONFLICT(awd_id) DO UPDATE SET
+) ON CONFLICT(awd_id, fiscal_year) DO UPDATE SET
     -- COALESCE: never overwrite good data with NULL from a bad re-fetch
     awd_titl_txt            = COALESCE(excluded.awd_titl_txt, awards.awd_titl_txt),
     inst_name               = COALESCE(excluded.inst_name, awards.inst_name),
     inst_state_code         = COALESCE(excluded.inst_state_code, awards.inst_state_code),
-    -- Take the higher amount: total_obligated_amount only grows over time.
-    awd_amount              = CASE
-                                WHEN excluded.awd_amount > awards.awd_amount THEN excluded.awd_amount
-                                ELSE awards.awd_amount
-                              END,
+    -- Always overwrite: awd_amount is this fiscal year's own amount, not a
+    -- lifetime total that only grows -- "take the higher" doesn't apply here.
+    awd_amount              = excluded.awd_amount,
     obligation_date         = COALESCE(excluded.obligation_date, awards.obligation_date),
     project_start_date      = COALESCE(excluded.project_start_date, awards.project_start_date),
     project_end_date        = COALESCE(excluded.project_end_date, awards.project_end_date),
@@ -95,8 +97,6 @@ INSERT INTO awards (
     pgm_ele_name            = COALESCE(excluded.pgm_ele_name, awards.pgm_ele_name),
     pi_name                 = COALESCE(excluded.pi_name, awards.pi_name),
     agcy_id                 = COALESCE(excluded.agcy_id, awards.agcy_id),
-    -- Never overwrite fiscal_year: the first insert captures the original award year.
-    fiscal_year             = awards.fiscal_year,
     raw_json                = COALESCE(excluded.raw_json, awards.raw_json),
     source                  = COALESCE(excluded.source, awards.source),
     opportunity_number      = COALESCE(excluded.opportunity_number, awards.opportunity_number),
@@ -145,9 +145,18 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_nih     ON awards(source, fiscal_year, nih_institute);",
     # get_nih_institutes DISTINCT (sidebar dropdown)
     "CREATE INDEX IF NOT EXISTS idx_awards_source_nih        ON awards(source, nih_institute);",
+    # Covering index for GROUP BY nih_institute with a fiscal_year RANGE filter
+    # (get_field_wide_stats, no institute_filter) -- fiscal_year as the 2nd
+    # column of idx_awards_source_fy_nih can't drive the GROUP BY (it's a
+    # range, not an equality), forcing a temp B-tree sort that's cheap on
+    # NSF's smaller table but ~70s on NIH's 481K rows. nih_institute as the
+    # 2nd column here lets SQLite group by index order with no sort step.
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_nih_fy     ON awards(source, nih_institute, fiscal_year);",
     # ── NSF-SPECIFIC ─────────────────────────────────────────────────────────
     # Directorate-level queries (top-level NSF)
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_dir     ON awards(source, fiscal_year, dir_abbr);",
+    # Same covering-index fix as idx_awards_source_nih_fy, for dir_abbr.
+    "CREATE INDEX IF NOT EXISTS idx_awards_source_dir_fy     ON awards(source, dir_abbr, fiscal_year);",
     # Division-level queries (NSF drill-down)
     "CREATE INDEX IF NOT EXISTS idx_awards_source_fy_div     ON awards(source, fiscal_year, div_abbr);",
     # Program element queries (NSF deepest level)

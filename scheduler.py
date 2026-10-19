@@ -11,11 +11,15 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 
 sys.path.insert(0, str(Path(__file__).parent))
 from src.db import init_db, upsert_nsf_awards_batch, log_refresh_start, log_refresh_end
-from scripts.nsf_api_fetcher import fetch_all, map_record
+from scripts.nsf_api_fetcher import fetch_all, map_records
 from scripts.nih_api_fetcher import fetch_all_by_date_range, map_record as nih_map_record
-from scripts.usaspending_api_fetcher import fetch_incremental, map_record_from_search, validate_record
+from scripts.fetch_grantsgov import fetch_and_save as grantsgov_fetch
+from scripts.load_grantsgov import load_from_jsonl as grantsgov_load
 
-DAYS_BACK = 2  # rolling window to catch weekends / late postings
+# USASpending is intentionally not refreshed -- dropped as a data source
+# (unreliable, not planned out). Only NSF + NIH going forward.
+
+DAYS_BACK = 7  # trailing window -- NSF/NIH don't publish same-day, so a week covers the lag
 
 
 def run_nsf_refresh():
@@ -35,7 +39,7 @@ def run_nsf_refresh():
             log_refresh_end(log_id, "success", records_fetched=0, records_upserted=0)
             return
 
-        mapped = [map_record(r) for r in raw_records if r.get("id")]
+        mapped = [row for r in raw_records if r.get("id") for row in map_records(r)]
         upsert_nsf_awards_batch(mapped)
         print(f"[scheduler] NSF done. Upserted {len(mapped)} records.", flush=True)
         log_refresh_end(log_id, "success", records_fetched=len(raw_records), records_upserted=len(mapped))
@@ -61,7 +65,7 @@ def run_nih_refresh():
             log_refresh_end(log_id, "success", records_fetched=0, records_upserted=0)
             return
 
-        mapped = [nih_map_record(r) for r in raw_records if r.get("project_num")]
+        mapped = [nih_map_record(r) for r in raw_records if r.get("appl_id") is not None]
         upsert_nsf_awards_batch(mapped)
         print(f"[scheduler] NIH done. Upserted {len(mapped)} records.", flush=True)
         log_refresh_end(log_id, "success", records_fetched=len(raw_records), records_upserted=len(mapped))
@@ -71,39 +75,25 @@ def run_nih_refresh():
         raise
 
 
-def run_usaspending_refresh():
-    """Incremental refresh for DOE, NASA, DOD, USDA, EPA, DHS, Commerce, ED,
-    DOT, HHS, NEH via the synchronous Advanced Search API — small rolling
-    date window, one paginated call across all agencies. No ZIP/job/poll."""
-    today = date.today()
-    date_to   = today.strftime("%Y-%m-%d")
-    date_from = (today - timedelta(days=DAYS_BACK)).strftime("%Y-%m-%d")
+def run_grantsgov_refresh():
+    """Download today's full Grants.gov extract and upsert into opportunities.
 
-    print(f"[scheduler] Fetching USASpending awards {date_from} → {date_to}", flush=True)
+    Unlike NSF/NIH/USASpending (rolling-window incremental APIs), Grants.gov
+    publishes one complete daily snapshot. The load-time upsert always applies
+    the incoming derived_status, so each run correctly transitions opportunities
+    posted -> closed -> archived. A day missed (extract not yet posted at run
+    time) self-heals on the next run because every extract is a full snapshot."""
+    print("[scheduler] Fetching Grants.gov daily extract", flush=True)
     init_db()
-    log_id = log_refresh_start("usaspending", details=f"{date_from} to {date_to}")
+    log_id = log_refresh_start("grantsgov", details=date.today().isoformat())
 
     try:
-        raw_records = fetch_incremental(date_from, date_to)
-        if not raw_records:
-            print("[scheduler] USASpending: No records returned.", flush=True)
-            log_refresh_end(log_id, "success", records_fetched=0, records_upserted=0)
-            return
-
-        mapped = []
-        for r in raw_records:
-            rec = map_record_from_search(r)
-            if rec is None:
-                continue
-            ok, _ = validate_record(rec)
-            if ok:
-                mapped.append(rec)
-
-        upsert_nsf_awards_batch(mapped)
-        print(f"[scheduler] USASpending done. Upserted {len(mapped)} records.", flush=True)
-        log_refresh_end(log_id, "success", records_fetched=len(raw_records), records_upserted=len(mapped))
+        jsonl_path = grantsgov_fetch()  # downloads today's extract -> JSONL, returns path
+        read_count, skip_count, upserted_count = grantsgov_load(jsonl_path)
+        print(f"[scheduler] Grants.gov done. Upserted {upserted_count} of {read_count} read.", flush=True)
+        log_refresh_end(log_id, "success", records_fetched=read_count, records_upserted=upserted_count)
     except Exception as e:
-        print(f"[scheduler] USASpending refresh failed: {e}", flush=True)
+        print(f"[scheduler] Grants.gov refresh failed: {e}", flush=True)
         log_refresh_end(log_id, "error", error_message=str(e))
         raise
 
@@ -114,15 +104,15 @@ if __name__ == "__main__":
     scheduler.add_job(run_nsf_refresh, "cron", hour=8, minute=0)
     # NIH refresh at 08:05 UTC (5 min offset to avoid simultaneous DB writes)
     scheduler.add_job(run_nih_refresh, "cron", hour=8, minute=5)
-    # USASpending refresh at 08:10 UTC (DOE, NASA, DOD, USDA, EPA, DHS, Commerce, ED, DOT, HHS, NEH)
-    scheduler.add_job(run_usaspending_refresh, "cron", hour=8, minute=10)
+    # Grants.gov refresh at 08:15 UTC (open/forecasted solicitations)
+    scheduler.add_job(run_grantsgov_refresh, "cron", hour=8, minute=15)
 
-    print("[scheduler] Starting. Will run NSF at 08:00, NIH at 08:05, USASpending at 08:10 UTC daily.", flush=True)
+    print("[scheduler] Starting. Will run NSF at 08:00, NIH at 08:05, Grants.gov at 08:15 UTC daily.", flush=True)
     print("[scheduler] Running NSF refresh now...", flush=True)
     run_nsf_refresh()
     print("[scheduler] Running NIH refresh now...", flush=True)
     run_nih_refresh()
-    print("[scheduler] Running USASpending refresh now...", flush=True)
-    run_usaspending_refresh()
+    print("[scheduler] Running Grants.gov refresh now...", flush=True)
+    run_grantsgov_refresh()
 
     scheduler.start()

@@ -129,6 +129,20 @@ def run():
     conn.commit()
     print(f"  {applied} peer flags applied")
 
+    # For peer/home institutions, canonical_name must be the curated
+    # peer_label, not whichever raw inst_name spelling happens to be most
+    # frequent in this award set -- that frequency can shift between
+    # rebuilds (e.g. NSF-only vs NSF+NIH) and silently breaks any code that
+    # matches on canonical_name expecting the curated short name (PEER_SHORT
+    # lookups in Home.py).
+    result = conn.execute("""
+        UPDATE institutions
+        SET canonical_name = peer_label
+        WHERE peer_label IS NOT NULL
+    """)
+    conn.commit()
+    print(f"  canonical_name overwritten with peer_label for {result.rowcount} peer institutions")
+
     # Verify peers
     rows = conn.execute("""
         SELECT inst_uei, peer_label, is_my_institution, is_peer_texas, is_peer_national

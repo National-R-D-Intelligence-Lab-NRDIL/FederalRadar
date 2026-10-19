@@ -1029,6 +1029,16 @@ def get_field_wide_stats(
         clauses.append(f"opportunity_number NOT IN ({placeholders_ed})")
         params.extend(ed_exclude_cfdas)
 
+    # SQLite's planner picks a same-prefix (source, fiscal_year, X) index over
+    # the covering (source, prog_col, fiscal_year) one even after ANALYZE --
+    # confirmed live, costs ~90s vs ~1s on NIH's 481K rows (negligible on
+    # NSF's smaller table, which is why this went unnoticed there). Hint the
+    # covering index explicitly for the two cases it exists for.
+    index_hint = {
+        "nih_institute": "INDEXED BY idx_awards_source_nih_fy",
+        "dir_abbr":       "INDEXED BY idx_awards_source_dir_fy",
+    }.get(prog_col, "")
+
     sql = f"""
         SELECT {prog_col} AS program_abbr,
                COUNT(*) AS field_awards,
@@ -1036,7 +1046,7 @@ def get_field_wide_stats(
                SUM(CASE WHEN fiscal_year = {fy_end}     THEN 1 ELSE 0 END) AS awards_current,
                SUM(CASE WHEN fiscal_year = {fy_end - 1} THEN 1 ELSE 0 END) AS awards_prev,
                SUM(CASE WHEN fiscal_year = {fy_end - 2} THEN 1 ELSE 0 END) AS awards_two_ago
-        FROM awards
+        FROM awards {index_hint}
         WHERE {" AND ".join(clauses)}
         GROUP BY {prog_col}
     """
@@ -1109,6 +1119,12 @@ def get_heatmap_data(
     # UEI placeholders appear twice in SELECT (unt_awards + unt_funding_m), so UEI params doubled
     params_full = list(my_ueis) + list(my_ueis) + params
 
+    # Same planner-choice issue as get_field_wide_stats() -- see comment there.
+    index_hint = {
+        "nih_institute": "INDEXED BY idx_awards_source_nih_fy",
+        "dir_abbr":       "INDEXED BY idx_awards_source_dir_fy",
+    }.get(prog_col, "")
+
     sql = f"""
         SELECT {prog_col} AS program_abbr,
                {name_expr} AS program,
@@ -1117,7 +1133,7 @@ def get_heatmap_data(
                ROUND(COALESCE(SUM(awd_amount), 0) / 1e6, 2) AS field_funding_m,
                SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN 1 ELSE 0 END) AS unt_awards,
                ROUND(COALESCE(SUM(CASE WHEN inst_uei IN ({uei_ph}) THEN awd_amount ELSE 0 END), 0) / 1e6, 2) AS unt_funding_m
-        FROM awards
+        FROM awards {index_hint}
         WHERE {" AND ".join(clauses)}
         GROUP BY {prog_col}, fiscal_year
         ORDER BY {prog_col}, fiscal_year
@@ -1310,21 +1326,40 @@ def get_pis_for_program(
     institution: str,
     agency: str,
     prog_col: str,
-    program_abbr: str,
+    program_abbr: str | None,
     fy_start: int,
     fy_end: int,
 ) -> pd.DataFrame:
-    """PIs at a given institution who won awards in a specific program."""
+    """PIs at a given institution who won awards in a specific program.
+
+    program_abbr=None means "all programs" for this institution/agency --
+    drops the program filter (and the matching subquery condition) entirely
+    instead of scoping to one program.
+    """
     ed_clause, ed_params = _ed_exclusion_clause()
+    prog_filter_outer = f"AND {prog_col} = ?" if program_abbr is not None else ""
+    prog_filter_sub = f"AND a2.{prog_col} = a.{prog_col}" if program_abbr is not None else ""
     sql = f"""
         SELECT pi_name AS PI,
                COUNT(*) AS Awards,
                COALESCE(SUM(awd_amount), 0) AS [Total Funding],
                MIN(fiscal_year) AS [First FY],
-               MAX(fiscal_year) AS [Last FY]
-        FROM awards
+               MAX(fiscal_year) AS [Last FY],
+               (SELECT GROUP_CONCAT(awd_id, ', ')
+                FROM (
+                    SELECT a2.awd_id AS awd_id, SUM(a2.awd_amount) AS total_amt
+                    FROM awards a2
+                    WHERE a2.source = a.source
+                      {prog_filter_sub}
+                      AND a2.inst_canonical_name = a.inst_canonical_name
+                      AND a2.pi_name = a.pi_name
+                      AND a2.fiscal_year BETWEEN ? AND ?
+                    GROUP BY a2.awd_id
+                    ORDER BY total_amt DESC
+                )) AS [Award IDs]
+        FROM awards a
         WHERE source = ?
-          AND {prog_col} = ?
+          {prog_filter_outer}
           AND inst_canonical_name = ?
           AND fiscal_year BETWEEN ? AND ?
           AND awd_amount > 0
@@ -1333,10 +1368,12 @@ def get_pis_for_program(
         GROUP BY pi_name
         ORDER BY [Total Funding] DESC
     """
+    params = [fy_start, fy_end, agency]
+    if program_abbr is not None:
+        params.append(program_abbr)
+    params += [institution, fy_start, fy_end, *ed_params]
     with _conn() as conn:
-        df = pd.read_sql_query(
-            sql, conn, params=(agency, program_abbr, institution, fy_start, fy_end, *ed_params)
-        )
+        df = pd.read_sql_query(sql, conn, params=params)
     df.index = range(1, len(df) + 1)
     # Keep FY columns as plain integers (not formatted as 2,024)
     for col in ("First FY", "Last FY"):

@@ -32,20 +32,27 @@ def iso_date(dt_str) -> str | None:
 
 
 def map_record(rec: dict) -> dict:
-    """Maps one NIH API result to the 21-column awards dict (DB adds created_at/updated_at).
+    """Maps one NIH API result to the awards dict. NIH's API already returns
+    one record per award PER FISCAL YEAR (appl_id) -- no unnesting needed,
+    unlike NSF's oblg_fy/fundsObligated. award_amount is already that year's
+    own amount, not a lifetime total.
 
-    NIH multi-year note: project_num changes yearly (1R35...-01 -> 5R35...-05).
-    Each year = one row in awards. core_project_num in raw_json links them.
+    awd_id = appl_id (NIH's own numeric per-year primary key) -- not
+    project_num, which is a formatted string that also changes per year but
+    is more fragile to parse/rely on. core_project_num (in raw_json) ties
+    appl_ids across years for project-level rollups, it's not the grain.
     """
     org = rec.get("organization") or {}
 
-    # Pick the IC with highest total_cost for nih_institute; fall back to first
-    ic_fundings = rec.get("agency_ic_fundings") or []
-    if ic_fundings:
-        top_ic = max(ic_fundings, key=lambda x: x.get("total_cost") or 0)
-        nih_institute = top_ic.get("abbreviation")
-    else:
-        nih_institute = None
+    # agency_ic_admin is the REAL funding institute/center for this record
+    # (confirmed live, same field Federal Radar V2 uses) -- falls back to
+    # the highest-total_cost entry in agency_ic_fundings if admin is absent.
+    ic_admin = rec.get("agency_ic_admin") or {}
+    nih_institute = ic_admin.get("abbreviation")
+    if not nih_institute:
+        ic_fundings = rec.get("agency_ic_fundings") or []
+        if ic_fundings:
+            nih_institute = max(ic_fundings, key=lambda x: x.get("total_cost") or 0).get("abbreviation")
 
     pi_name = rec.get("contact_pi_name")
     if pi_name:
@@ -55,9 +62,13 @@ def map_record(rec: dict) -> dict:
         awd_amount = float(rec["award_amount"]) if rec.get("award_amount") is not None else None
     except (TypeError, ValueError):
         awd_amount = None
+    try:
+        direct_cost_amt = float(rec["direct_cost_amt"]) if rec.get("direct_cost_amt") is not None else None
+    except (TypeError, ValueError):
+        direct_cost_amt = None
 
     return {
-        "awd_id":                 rec.get("project_num"),
+        "awd_id":                 str(rec["appl_id"]) if rec.get("appl_id") is not None else None,
         "awd_titl_txt":           rec.get("project_title"),
         "inst_name":              org.get("org_name"),
         "inst_state_code":        org.get("org_state"),
@@ -73,7 +84,7 @@ def map_record(rec: dict) -> dict:
         "source":                 "nih",
         "activity_code":          rec.get("activity_code"),
         "nih_institute":          nih_institute,
-        "direct_cost_amt":        rec.get("direct_cost_amt"),
+        "direct_cost_amt":        direct_cost_amt,
         "opportunity_number":     rec.get("opportunity_number"),
         # NIH has no directorate/division/program-element equivalents
         "dir_abbr":               None,
@@ -386,7 +397,7 @@ def load_from_jsonl(path: str | Path) -> None:
             except json.JSONDecodeError:
                 skip_count += 1
                 continue
-            if not rec.get("project_num"):
+            if rec.get("appl_id") is None:
                 skip_count += 1
                 continue
             mapped.append(map_record(rec))
@@ -470,7 +481,7 @@ def main():
             log_refresh_end(log_id, "success", 0, 0)
             return
 
-        mapped = [map_record(r) for r in raw_records if r.get("project_num")]
+        mapped = [map_record(r) for r in raw_records if r.get("appl_id") is not None]
 
         print(f"\nFetched:  {len(raw_records):>6,}")
         print(f"Mapped:   {len(mapped):>6,}")

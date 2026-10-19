@@ -276,23 +276,6 @@ st.markdown(f"# {scope_label}")
 st.caption(f"FY{fy_start}–{fy_end}  ·  {peer_set} peers")
 
 # ---------------------------------------------------------------------------
-# Data freshness bar — visible at top of every page load
-# ---------------------------------------------------------------------------
-
-_freshness_df = get_data_freshness()
-if not _freshness_df.empty:
-    AGENCY_LABELS = {
-        "nih": "NIH", "nsf": "NSF", "ed": "Education", "dod": "DOD",
-        "doe": "DOE", "hhs": "HHS", "usda": "USDA", "nasa": "NASA",
-        "commerce": "Commerce", "dot": "DOT", "epa": "EPA",
-        "neh": "NEH", "dhs": "DHS",
-    }
-    _freshness_parts = []
-    for _, _fr in _freshness_df.iterrows():
-        _lbl = AGENCY_LABELS.get(_fr["source"], _fr["source"].upper())
-        _date = (_fr["last_refresh_at"] or "")[:10]
-        _freshness_parts.append(f"**{_lbl}:** {_date or 'unknown'}")
-    st.caption("Data last refreshed — " + "  ·  ".join(_freshness_parts))
 
 # ---------------------------------------------------------------------------
 # Handle unsupported agency or empty data
@@ -381,41 +364,7 @@ c4.metric("Programs with Gaps",      str(n_gaps))
 
 st.divider()
 
-# ---------------------------------------------------------------------------
-# Headline — one sentence, most important gap
-# ---------------------------------------------------------------------------
-
 _headline = ""
-if peer_cols:
-    peer_avg_awards  = pivot_n[peer_cols].mean(axis=1)
-    dollar_gap       = peer_avg_funding - pivot_m[my_inst_name]
-    gap_programs     = dollar_gap[dollar_gap > 0].sort_values(ascending=False)
-
-    if not gap_programs.empty:
-        top_prog       = gap_programs.index[0]
-        top_prog_label = abbr_to_name.get(top_prog, top_prog)
-        unt_awards_top = int(pivot_n.loc[top_prog, my_inst_name])
-        peer_avg_top   = round(float(peer_avg_awards.loc[top_prog]), 1)
-        gap_m_top      = round(float(dollar_gap[top_prog]), 2)
-
-        # Find the single peer with most awards in top program
-        top_peer_awards = pivot_n.loc[top_prog, peer_cols].sort_values(ascending=False)
-        top_peer_name   = _peer_short.get(top_peer_awards.index[0], top_peer_awards.index[0])
-        top_peer_count  = int(top_peer_awards.iloc[0])
-
-        _headline = (
-            f"**Biggest gap: {top_prog_label}** — "
-            f"In this program, {my_col_label} has **{unt_awards_top} awards**, "
-            f"peers average **{peer_avg_top:.0f}** "
-            f"({top_peer_name} leads with **{top_peer_count}**). "
-            f"If {my_col_label} matched the peer average, it would represent "
-            f"an additional **{_fmt_dollars(gap_m_top)}** in funding."
-        )
-        st.markdown(_headline)
-    else:
-        _headline = ""
-
-st.divider()
 
 # ---------------------------------------------------------------------------
 # Gap table
@@ -596,12 +545,14 @@ if agency in ("nsf", "nih"):
         _programs_for_pi = [p for p in pivot_n.index if pivot_n.loc[p, _pi_inst_choice] > 0]
         if not _programs_for_pi:
             st.info(f"No programs with awards for {_pi_inst_labels.get(_pi_inst_choice, _pi_inst_choice)}.")
-            _pi_prog_abbr = None
         else:
-            _display_progs = [abbr_to_name.get(p, p) for p in _programs_for_pi]
+            _display_progs = ["(All)"] + [abbr_to_name.get(p, p) for p in _programs_for_pi]
             _pi_prog_choice = st.selectbox("Program", _display_progs, key="pi_prog")
-            _pi_prog_idx = _display_progs.index(_pi_prog_choice) if _pi_prog_choice in _display_progs else 0
-            _pi_prog_abbr = _programs_for_pi[_pi_prog_idx]
+            if _pi_prog_choice == "(All)":
+                _pi_prog_abbr = None
+            else:
+                _pi_prog_idx = _display_progs.index(_pi_prog_choice) - 1
+                _pi_prog_abbr = _programs_for_pi[_pi_prog_idx]
 
             _pi_df = get_pis_for_program(
                 _pi_inst_choice, agency, _prog_col, _pi_prog_abbr, fy_start, fy_end
@@ -621,8 +572,12 @@ if agency in ("nsf", "nih"):
                     _pi_df,
                     use_container_width=True,
                     column_config={
-                        "First FY": st.column_config.NumberColumn(format="%d"),
-                        "Last FY": st.column_config.NumberColumn(format="%d"),
+                        "First FY":     st.column_config.NumberColumn(format="%d"),
+                        "Last FY":      st.column_config.NumberColumn(format="%d"),
+                        "Award IDs": st.column_config.TextColumn(
+                            "Award IDs",
+                            help="All awards, largest first — search ID on NSF.gov or NIH RePORTER",
+                        ),
                     },
                 )
 

@@ -18,7 +18,14 @@ RAW_DIR = Path(__file__).parent.parent / "data" / "raw" / "nsf"
 BATCH_SIZE = 500
 
 
-def map_record(raw: dict) -> dict:
+def map_records(raw: dict) -> list:
+    """One row per award PER FISCAL YEAR -- unnests oblg_fy instead of
+    collapsing the award to a single lifetime-total row. Each entry's own
+    fund_oblg_fiscal_yr/fund_oblg_amt (or fiscal_yr/oblg_amt for the small
+    number of contract-style awards) becomes that row's fiscal_year/awd_amount.
+    All other fields are constant per award and repeated on every year-row.
+    A $0 entry still produces a row -- never dropped.
+    """
     # institution (single dict, not a list)
     inst = raw.get("inst") or {}
 
@@ -34,29 +41,17 @@ def map_record(raw: dict) -> dict:
     pgm_ele = raw.get("pgm_ele") or []
     pgm_ele_name = pgm_ele[0].get("pgm_ele_name") if pgm_ele else None
 
-    # fiscal year: derived from obligation_date (awd_min_amd_letter_date) using federal rule
-    # FY starts Oct 1 — if month >= 10, fiscal_year = year + 1, else fiscal_year = year
-    obl_date = raw.get("awd_min_amd_letter_date") or ""
-    try:
-        obl_year  = int(obl_date.split("-")[0])
-        obl_month = int(obl_date.split("-")[1])
-        fiscal_year = obl_year + 1 if obl_month >= 10 else obl_year
-    except (ValueError, IndexError):
-        fiscal_year = None
+    # No per-year obligation date exists in NSF bulk data -- the only date
+    # available (awd_min_amd_letter_date) is award-level, so it's reused
+    # as-is on every year-row rather than implying a false per-year date.
+    obligation_date = raw.get("awd_min_amd_letter_date")
 
-    # awd_amount as float
-    try:
-        awd_amount = float(raw["awd_amount"]) if raw.get("awd_amount") is not None else None
-    except (TypeError, ValueError):
-        awd_amount = None
-
-    return {
+    common = {
         "awd_id":                 raw.get("awd_id"),
         "awd_titl_txt":           raw.get("awd_titl_txt"),
         "inst_name":              inst.get("inst_name"),
         "inst_state_code":        inst.get("inst_state_code"),
-        "awd_amount":             awd_amount,
-        "obligation_date":        raw.get("awd_min_amd_letter_date"),
+        "obligation_date":        obligation_date,
         "project_start_date":     raw.get("awd_eff_date"),
         "project_end_date":       raw.get("awd_exp_date"),
         "awd_abstract_narration": raw.get("awd_abstract_narration"),
@@ -65,7 +60,6 @@ def map_record(raw: dict) -> dict:
         "pgm_ele_name":           pgm_ele_name,
         "pi_name":                pi_name,
         "agcy_id":                raw.get("agcy_id"),
-        "fiscal_year":            fiscal_year,
         "raw_json":               json.dumps(raw),
         "source":                 "nsf",
         "opportunity_number":     None,
@@ -74,21 +68,36 @@ def map_record(raw: dict) -> dict:
         "direct_cost_amt":        None,
     }
 
+    oblg_fy = raw.get("oblg_fy") or []
+    records = []
+    for entry in oblg_fy:
+        # normal shape: {fund_oblg_fiscal_yr, fund_oblg_amt}
+        # contract-style shape (e.g. 49100421C0035): {fiscal_yr, oblg_amt}
+        fy_raw = entry.get("fund_oblg_fiscal_yr", entry.get("fiscal_yr"))
+        amt_raw = entry.get("fund_oblg_amt", entry.get("oblg_amt"))
+        try:
+            fiscal_year = int(fy_raw) if fy_raw is not None else None
+        except (TypeError, ValueError):
+            fiscal_year = None
+        try:
+            awd_amount = float(amt_raw) if amt_raw is not None else None
+        except (TypeError, ValueError):
+            awd_amount = None
+        if fiscal_year is None:
+            continue
+        records.append({**common, "fiscal_year": fiscal_year, "awd_amount": awd_amount})
 
-def count_existing(awd_id: str, conn: sqlite3.Connection) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM awards WHERE awd_id = ?", (awd_id,)
-    ).fetchone()
-    return row is not None
+    return records
 
 
 def process_zip(zip_path: Path) -> dict:
     stats = {"total": 0, "inserted": 0, "updated": 0}
 
-    # snapshot existing IDs for this run to track inserts vs updates
+    # snapshot existing (awd_id, fiscal_year) keys for this run to track inserts vs updates
     conn = sqlite3.connect(DB_PATH)
-    existing_ids = set(
-        row[0] for row in conn.execute("SELECT awd_id FROM awards").fetchall()
+    existing_keys = set(
+        (row[0], row[1])
+        for row in conn.execute("SELECT awd_id, fiscal_year FROM awards WHERE source = 'nsf'").fetchall()
     )
     conn.close()
 
@@ -104,31 +113,32 @@ def process_zip(zip_path: Path) -> dict:
                 except json.JSONDecodeError:
                     continue
 
-            record = map_record(raw)
-            if not record.get("awd_id"):
+            if not raw.get("awd_id"):
                 continue
 
-            is_update = record["awd_id"] in existing_ids
-            batch.append(record)
+            for record in map_records(raw):
+                key = (record["awd_id"], record["fiscal_year"])
+                is_update = key in existing_keys
+                batch.append(record)
 
-            stats["total"] += 1
-            if is_update:
-                stats["updated"] += 1
-            else:
-                stats["inserted"] += 1
-                existing_ids.add(record["awd_id"])
+                stats["total"] += 1
+                if is_update:
+                    stats["updated"] += 1
+                else:
+                    stats["inserted"] += 1
+                    existing_keys.add(key)
 
-            if len(batch) >= BATCH_SIZE:
-                upsert_nsf_awards_batch(batch)
-                batch.clear()
+                if len(batch) >= BATCH_SIZE:
+                    upsert_nsf_awards_batch(batch)
+                    batch.clear()
 
-            if stats["total"] % 1000 == 0:
-                print(
-                    f"  [{zip_path.name}] "
-                    f"processed={stats['total']:,}  "
-                    f"inserted={stats['inserted']:,}  "
-                    f"updated={stats['updated']:,}"
-                )
+                if stats["total"] % 1000 == 0:
+                    print(
+                        f"  [{zip_path.name}] "
+                        f"processed={stats['total']:,}  "
+                        f"inserted={stats['inserted']:,}  "
+                        f"updated={stats['updated']:,}"
+                    )
 
     if batch:
         upsert_nsf_awards_batch(batch)
